@@ -1,0 +1,10 @@
+# scripts/99-ws281x.rules
+# Copy to /etc/udev/rules.d/ then run: sudo udevadm control --reload-rules
+# This allows the 'gpio' group to use DMA-based LED control without sudo.
+#
+# Then add your user to the group:
+#   sudo usermod -aG gpio $USER
+#   (log out and back in)
+
+SUBSYSTEM=="bcm2708_vcio", GROUP="gpio", MODE="0660"
+SUBSYSTEM=="rpivid-*",     GROUP="gpio", MODE="0660"

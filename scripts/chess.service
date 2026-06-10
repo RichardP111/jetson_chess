@@ -1,0 +1,31 @@
+# scripts/chess.service
+# Systemd unit to run the chess board automatically on boot.
+#
+# Install:
+#   sudo cp scripts/chess.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable chess.service
+#   sudo systemctl start chess.service
+#
+# Logs:
+#   sudo journalctl -u chess.service -f
+
+[Unit]
+Description=Jetson Smart Chess Board
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/jetson/jetson_chess
+Environment="STOCKFISH_PATH=/usr/games/stockfish"
+EnvironmentFile=/home/jetson/jetson_chess/.env
+ExecStart=/usr/bin/python3 /home/jetson/jetson_chess/main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

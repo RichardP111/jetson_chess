@@ -1,0 +1,25 @@
+# requirements.txt
+# Install with: pip install -r requirements.txt --break-system-packages
+
+# Chess logic + Stockfish UCI interface
+python-chess>=1.10.0
+
+# WS2812b LED control (requires root or udev rule — see scripts/99-ws281x.rules)
+rpi_ws281x>=4.3.4
+
+# Jetson GPIO (pre-installed on JetPack, listed here for reference)
+# Jetson.GPIO>=2.1.6
+
+# Lichess API client
+berserk>=0.13.1
+
+# OLED display
+luma.oled>=3.13.0
+Pillow>=10.0.0
+
+# Web dashboard
+flask>=3.0.0
+flask-socketio>=5.3.6
+
+# System monitoring (optional, for web dashboard system stats)
+psutil>=5.9.0
