@@ -5,13 +5,6 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/stars/RichardP111/jetson_chess?style=for-the-badge"/>
-  <img src="https://img.shields.io/github/forks/RichardP111/jetson_chess?style=for-the-badge"/>
-  <img src="https://img.shields.io/github/issues/RichardP111/jetson_chess?style=for-the-badge"/>
-  <img src="https://img.shields.io/github/license/RichardP111/jetson_chess?style=for-the-badge"/>
-</p>
-
-<p align="center">
   <img src="https://img.shields.io/badge/Platform-Jetson%20Orin%20Nano-blue?style=flat-square"/>
   <img src="https://img.shields.io/badge/Python-3.10+-yellow?style=flat-square"/>
   <img src="https://img.shields.io/badge/Engine-Stockfish-green?style=flat-square"/>
@@ -31,7 +24,7 @@ It integrates:
 * 🌈 LED move visualization
 * 🌐 Optional Lichess online play
 
----
+
 
 ## ✨ Features
 
@@ -42,7 +35,7 @@ It integrates:
 * 🔌 Powered directly from Jetson (no external PSU)
 * 🧩 Clean single-board architecture
 
----
+
 
 ## 🧠 Architecture
 
@@ -57,7 +50,7 @@ It integrates:
   * Engine integration (Stockfish)
   * LED rendering and animations
 
----
+
 
 ## 🔧 Hardware
 
@@ -68,9 +61,9 @@ It integrates:
 | Jetson Orin Nano 8GB   | Main compute platform                |
 | WS2812B LEDs (64 + 22) | Chessboard + control panel           |
 | Push buttons (×10)     | Input system                         |
-| **KS74HCTLS04N**       | Logic inverter / signal conditioning |
+| **TXS0108E**           | Logic inverter / signal conditioning |
 
----
+
 
 ### ⚡ Power Design
 
@@ -82,7 +75,7 @@ This build intentionally avoids external power:
 
 > This design prioritizes simplicity and integration over maximum brightness.
 
----
+
 
 ### 🔌 GPIO Mapping (Jetson 40-pin Header)
 
@@ -92,7 +85,7 @@ This build intentionally avoids external power:
 | Control Panel LED Data | 33                                    |
 | Buttons                | 7, 11, 13, 15, 29, 31, 26, 24, 19, 16 |
 
----
+
 
 ## 🖥️ Software Setup
 
@@ -122,7 +115,6 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 Log out and back in after this step.
 
----
 
 ### 4. LED permissions
 
@@ -131,7 +123,6 @@ sudo cp scripts/99-ws281x.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 ```
 
----
 
 ### 5. Optional: Lichess integration
 
@@ -145,7 +136,6 @@ sudo udevadm control --reload-rules
 export LICHESS_TOKEN="your_token_here"
 ```
 
----
 
 ## ▶️ Running
 
@@ -155,7 +145,6 @@ export LICHESS_TOKEN="your_token_here"
 MOCK_LEDS=1 MOCK_BUTTONS=1 MOCK_ONLINE=1 python3 tests/test_mock_game.py
 ```
 
----
 
 ### Hardware test
 
@@ -163,7 +152,6 @@ MOCK_LEDS=1 MOCK_BUTTONS=1 MOCK_ONLINE=1 python3 tests/test_mock_game.py
 sudo python3 tests/test_leds_buttons.py
 ```
 
----
 
 ### Stockfish test
 
@@ -171,7 +159,6 @@ sudo python3 tests/test_leds_buttons.py
 python3 tests/test_stockfish.py
 ```
 
----
 
 ### Full system
 
@@ -179,7 +166,6 @@ python3 tests/test_stockfish.py
 sudo python3 main.py
 ```
 
----
 
 ## 🎮 Gameplay
 
@@ -190,7 +176,6 @@ sudo python3 main.py
 3. Repeat for destination
 4. Press **OK** to confirm
 
----
 
 ### Controls
 
@@ -200,7 +185,6 @@ sudo python3 main.py
 | New Game | Hold HINT + OK       |
 | Shutdown | Hold HINT + Button 8 |
 
----
 
 ### Visual Feedback
 
@@ -212,7 +196,6 @@ sudo python3 main.py
 | Error     | Blue + red X   |
 | Checkmate | Animation      |
 
----
 
 ## 🆚 Original vs This Build
 
@@ -221,10 +204,9 @@ sudo python3 main.py
 | Architecture  | Pi + Arduino | Jetson only      |
 | Communication | USB serial   | Direct GPIO      |
 | Power         | External PSU | No external PSU  |
-| Logic IC      | 74AHCT125    | **KS74HCTLS04N** |
+| Logic IC      | 74AHCT125    | **TXS0108E**     |
 | Performance   | Moderate     | High             |
 
----
 
 ## 📁 Project Structure
 
@@ -239,23 +221,8 @@ jetson_chess/
 └── scripts/
 ```
 
----
-
-## 🔮 Future Improvements
-
-* Optional external power for full brightness
-* Mobile app integration
-* Camera-based piece detection
-* Stronger AI engines
-
----
 
 ## 📜 License
 
-Open-source project based on the original Smart Chess Board concept.
+MIT open-source project based on the original Smart Chess Board concept.
 
----
-
-<p align="center">
-  <strong>⭐ Star this repo if you found it useful</strong>
-</p>
