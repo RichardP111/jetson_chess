@@ -19,7 +19,7 @@ This project is a **fully self-contained smart chess board** powered by the **NV
 
 It integrates:
 
-* 🧠 Local AI using Stockfish
+* 🧠 Local AI
 * 🎮 Physical button-based input
 * 🌈 LED move visualization
 * 🌐 Optional Lichess online play
@@ -29,7 +29,7 @@ It integrates:
 ## ✨ Features
 
 * ♟️ Full chess gameplay with physical controls
-* ⚡ Fast local AI (Stockfish on ARM Cortex-A78AE)
+* ⚡ Fast local AI
 * 🎯 LED-based move highlighting and animations
 * 💡 Hint system (visual suggestions)
 * 🔌 Powered directly from Jetson (no external PSU)
@@ -47,7 +47,7 @@ It integrates:
 * Python handles:
 
   * Game logic (`python-chess`)
-  * Engine integration (Stockfish)
+  * Engine integration
   * LED rendering and animations
 
 
@@ -222,7 +222,19 @@ jetson_chess/
 ```
 
 
-## 📜 License
+## ⚖️ License & Acknowledgements
 
-MIT open-source project based on the original Smart Chess Board concept.
+This project uses a split-license structure:
+
+* **Software:** All code in this repository is licensed under the [MIT License](LICENSE).
+* **Hardware:** The 3D printable files (`.stl`) located in the `/3D models` directory are licensed under the **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)** license.
+
+**Hardware Attribution:**
+The 3D models for this chessboard are a modified derivative of the original Smart Chess project created by DIYMachines, originally licensed under CC BY-NC-SA 4.0. 
+
+**Modifications made to the original models include:**
+* Redesigned the main electronics bay to house the NVIDIA Jetson Orin Nano.
+* Added specific cutouts and airflow routing for the Jetson's exhaust fan.
+* Modified the top faceplate to reposition the OLED screen.
+* Altered the internal mounts for the 10-button control panel to fit the new layout.
 
