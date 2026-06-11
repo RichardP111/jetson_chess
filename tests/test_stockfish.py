@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
-"""
-tests/test_stockfish.py
-Quick test to verify Stockfish is installed and responding.
-
-  python3 tests/test_stockfish.py
-"""
+# =============================================================================
+# tests/test_stockfish.py
+# Author : Richard Pu
+# Created: 2026-06-10
+# Purpose: Smoke test confirming Stockfish is installed, responding to UCI,
+#          and returning legal moves and eval hints for a test position.
+# =============================================================================
 
 import sys
 import os

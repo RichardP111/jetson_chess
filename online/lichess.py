@@ -1,18 +1,11 @@
-"""
-online/lichess.py
-Lichess integration via the berserk library.
-
-Setup:
-  1. Create a Lichess account at https://lichess.org
-  2. Generate a Personal Access Token at https://lichess.org/account/oauth/token
-     with scopes: challenge:write, board:play
-  3. Set the token as an environment variable:
-       export LICHESS_TOKEN="your_token_here"
-  4. Install berserk:
-       pip install berserk
-
-The original project used Lichess board API — this replicates that behaviour.
-"""
+# =============================================================================
+# online/lichess.py
+# Author : Richard Pu
+# Created: 2026-06-10
+# Purpose: Lichess board API integration via berserk. Handles game creation,
+#          move submission, and opponent move streaming. Falls back to mock
+#          mode if LICHESS_TOKEN is unset or MOCK_ONLINE=1 is set.
+# =============================================================================
 
 import os
 import time

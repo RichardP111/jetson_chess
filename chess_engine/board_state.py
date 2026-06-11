@@ -1,8 +1,11 @@
-"""
-chess_engine/board_state.py
-Tracks which squares are occupied (mirrors Arduino currentBoard[8][8]).
-Also owns a python-chess Board for FEN generation and legal move checking.
-"""
+# =============================================================================
+# chess_engine/board_state.py
+# Author : Richard Pu
+# Created: 2026-06-10
+# Purpose: Dual-representation board state — mirrors the Arduino currentBoard
+#          array for square occupancy, backed by a python-chess Board for FEN
+#          generation, legal move checking, and move history.
+# =============================================================================
 
 import logging
 import chess

@@ -1,24 +1,12 @@
-"""
-hardware/buttons.py
-Button input via Jetson Orin Nano GPIO.
-
-Maps the 10 original Arduino buttons (active-LOW, internal pull-up) to
-Jetson 40-pin header BOARD-mode pins.
-
-Pin mapping:
-  Pin 7  (GPIO216) → Button 1  (A / col 1 / row 1)
-  Pin 11 (GPIO50)  → Button 2  (B / col 2 / row 2)
-  Pin 13 (GPIO51)  → Button 3  (C / col 3 / row 3)
-  Pin 15 (GPIO160) → Button 4  (D / col 4 / row 4)
-  Pin 29 (GPIO149) → Button 5  (E / col 5 / row 5)
-  Pin 31 (GPIO200) → Button 6  (F / col 6 / row 6)
-  Pin 26 (GPIO168) → Button 7  (G / col 7 / row 7)
-  Pin 24 (GPIO195) → Button 8  (H / col 8 / row 8)
-  Pin 19 (GPIO37)  → Button 9  (OK / confirm)
-  Pin 16 (GPIO163) → HINT button (hardware interrupt, falling edge)
-
-Set MOCK_BUTTONS=1 to run without GPIO hardware (keyboard input in terminal).
-"""
+# =============================================================================
+# hardware/buttons.py
+# Author : Richard Pu
+# Created: 2026-06-10
+# Purpose: Button input via Jetson Orin Nano GPIO. Maps 10 active-LOW buttons
+#          to 40-pin header BOARD-mode pins, with interrupt-driven hint button
+#          and 300 ms debounce matching the original Arduino sketch.
+#          Set MOCK_BUTTONS=1 to run without GPIO hardware (terminal input).
+# =============================================================================
 
 import os
 import time

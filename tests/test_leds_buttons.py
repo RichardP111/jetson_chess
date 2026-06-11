@@ -1,14 +1,11 @@
-#!/usr/bin/env python3
-"""
-tests/test_leds_buttons.py
-Hardware test — direct port of ChessBoardTestLights_Buttons.ino
-
-Run on the Jetson (requires hardware or MOCK_LEDS=1 MOCK_BUTTONS=1):
-  sudo python3 tests/test_leds_buttons.py
-
-Or on desktop in mock mode:
-  MOCK_LEDS=1 MOCK_BUTTONS=1 python3 tests/test_leds_buttons.py
-"""
+# =============================================================================
+# tests/test_leds_buttons.py
+# Author : Richard Pu
+# Created: 2026-06-10
+# Purpose: Hardware integration test — direct port of ChessBoardTestLights_
+#          Buttons.ino. Cycles LED colours across both strips and polls all
+#          9 buttons. Run with MOCK_LEDS=1 MOCK_BUTTONS=1 for desktop use.
+# =============================================================================
 
 import sys
 import os

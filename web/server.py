@@ -1,24 +1,15 @@
-"""
-web/server.py
-Real-time web dashboard for the Smart Chess Board.
-
-Access from any device on the same network:
-  http://<jetson-ip>:5000
-
-Features:
-  - Live chess board with current position (SVG rendered)
-  - Move history log
-  - Engine thinking indicator
-  - LED theme switcher
-  - Game controls (new game, hint request)
-  - Stockfish evaluation bar
-  - System info (CPU temp, Jetson stats)
-
-Install:
-  pip install flask flask-socketio python-chess --break-system-packages
-
-Run alongside main.py — it starts in a background thread automatically.
-"""
+# =============================================================================
+# web/server.py
+# Author : Richard Pu
+# Created: 2026-06-10
+# Purpose: Real-time web dashboard for the Jetson smart chessboard.
+#          Accessible from any device on the same network at http://<ip>:5000.
+#          Runs as a daemon thread launched automatically by main.py.
+#          Flask secret key is loaded from the FLASK_SECRET_KEY environment
+#          variable (set in .env) — never hardcoded in source.
+# Deps   : flask flask-socketio python-chess
+#          pip install flask flask-socketio python-chess --break-system-packages
+# =============================================================================
 
 import os
 import time
@@ -32,38 +23,37 @@ from flask_socketio import SocketIO, emit
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "fallback_dev_key")
+app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY") or (_ for _ in ()).throw(
+    RuntimeError("FLASK_SECRET_KEY is not set. Add it to your .env file.")
+)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-# ── Shared state (written by main.py, read by dashboard) ─────────────────────
 _state = {
     "fen":          chess.STARTING_FEN,
-    "move_history": [],          # list of UCI strings
+    "move_history": [],
     "whose_turn":   "White",
     "game_mode":    "—",
     "difficulty":   0,
-    "last_move":    None,        # chess.Move or None
+    "last_move":    None,
     "status":       "Waiting to start",
     "thinking":     False,
     "theme":        "classic",
-    "eval_score":   0,           # centipawns from white's perspective
+    "eval_score":   0,
     "hint_move":    "",
     "game_active":  False,
 }
 _state_lock = threading.Lock()
 
-# Callback hooks set by main.py so the dashboard can trigger game actions
 _callbacks = {
-    "new_game":   None,
-    "hint":       None,
-    "set_theme":  None,
+    "new_game":  None,
+    "hint":      None,
+    "set_theme": None,
 }
 
 
-# ── Public API (called from main.py) ─────────────────────────────────────────
+# ── Public API (called from main.py) ──────────────────────────────────────
 
 def update_state(**kwargs):
-    """Thread-safe state update + push to all connected browsers."""
     with _state_lock:
         _state.update(kwargs)
     _push_state()
@@ -76,7 +66,6 @@ def register_callbacks(new_game=None, hint=None, set_theme=None):
 
 
 def start_server(host="0.0.0.0", port=5000):
-    """Start the Flask-SocketIO server in a daemon thread."""
     t = threading.Thread(
         target=lambda: socketio.run(app, host=host, port=port,
                                     allow_unsafe_werkzeug=True),
@@ -87,16 +76,16 @@ def start_server(host="0.0.0.0", port=5000):
     log.info(f"Web dashboard running at http://{host}:{port}")
 
 
-# ── Socket push ──────────────────────────────────────────────────────────────
+# ── Socket push ────────────────────────────────────────────────────────────
 
 def _push_state():
     with _state_lock:
-        board = chess.Board(_state["fen"])
-        last  = _state["last_move"]
+        board  = chess.Board(_state["fen"])
+        last   = _state["last_move"]
         arrows = []
         if last:
             try:
-                move = chess.Move.from_uci(last)
+                move   = chess.Move.from_uci(last)
                 arrows = [chess.svg.Arrow(move.from_square, move.to_square,
                                           color="#00ff00")]
             except Exception:
@@ -116,10 +105,10 @@ def _push_state():
             arrows=arrows,
             size=360,
             colors={
-                "square light": "#f0d9b5",
-                "square dark":  "#b58863",
-                "square light lastmove": "#cdd16a",
-                "square dark lastmove":  "#aaa23a",
+                "square light":           "#f0d9b5",
+                "square dark":            "#b58863",
+                "square light lastmove":  "#cdd16a",
+                "square dark lastmove":   "#aaa23a",
             },
         )
         payload = {
@@ -139,7 +128,7 @@ def _push_state():
     socketio.emit("state_update", payload)
 
 
-# ── Routes ───────────────────────────────────────────────────────────────────
+# ── Routes ─────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
@@ -155,7 +144,6 @@ def api_state():
 
 @app.route("/api/system")
 def api_system():
-    """Return Jetson system info."""
     info = {}
     try:
         with open("/sys/class/thermal/thermal_zone0/temp") as f:
@@ -164,7 +152,7 @@ def api_system():
         info["cpu_temp_c"] = "N/A"
     try:
         import psutil
-        info["cpu_pct"]  = psutil.cpu_percent(interval=0.1)
+        info["cpu_pct"]      = psutil.cpu_percent(interval=0.1)
         mem = psutil.virtual_memory()
         info["ram_used_mb"]  = mem.used  // 1024 // 1024
         info["ram_total_mb"] = mem.total // 1024 // 1024
@@ -173,7 +161,7 @@ def api_system():
     return jsonify(info)
 
 
-# ── Socket events ────────────────────────────────────────────────────────────
+# ── Socket events ──────────────────────────────────────────────────────────
 
 @socketio.on("connect")
 def on_connect():
@@ -204,7 +192,7 @@ def on_set_theme(data):
         _callbacks["set_theme"](theme)
 
 
-# ── Dashboard HTML (single-file, no external CDN except Socket.IO) ───────────
+# ── Dashboard HTML ─────────────────────────────────────────────────────────
 
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -258,7 +246,6 @@ DASHBOARD_HTML = """
                transition: width 0.5s; }
   .eval-label { text-align: center; font-size: 0.72rem; color: var(--muted); margin-top: 3px; }
 
-  /* Right column */
   .right-col { display: flex; flex-direction: column; gap: 12px; }
 
   .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -311,7 +298,6 @@ DASHBOARD_HTML = """
 
 <div class="layout">
 
-  <!-- Left: board + eval -->
   <div style="display:flex;flex-direction:column;gap:12px;">
     <div class="panel" id="board-panel">
       <div id="turn-banner" class="turn-banner turn-white">White's Turn</div>
@@ -327,7 +313,6 @@ DASHBOARD_HTML = """
     </div>
   </div>
 
-  <!-- Right: stats, history, controls -->
   <div class="right-col">
 
     <div class="panel">
@@ -387,16 +372,13 @@ socket.on('disconnect', () => {
 });
 
 socket.on('state_update', (d) => {
-  // Board SVG
   document.getElementById('board-svg').innerHTML = d.board_svg;
 
-  // Turn banner
   const banner = document.getElementById('turn-banner');
   banner.className = 'turn-banner ' + (d.thinking ? 'thinking' :
                      (d.whose_turn === 'White' ? 'turn-white' : 'turn-black'));
   banner.textContent = d.thinking ? '⏳ Engine thinking...' : d.whose_turn + "'s Turn";
 
-  // Stats
   document.getElementById('s-mode').textContent  = d.game_mode  || '—';
   document.getElementById('s-diff').textContent  = d.difficulty || '—';
   document.getElementById('s-moves').textContent = d.move_count || 0;
@@ -404,10 +386,8 @@ socket.on('state_update', (d) => {
   document.getElementById('mode-badge').textContent = d.game_mode || '—';
   document.getElementById('turn-badge').textContent = d.whose_turn + "'s Turn";
 
-  // Status
   document.getElementById('status-line').textContent = d.status || '';
 
-  // Eval bar
   const score = Math.max(-500, Math.min(500, d.eval_score || 0));
   const pct   = ((score + 500) / 1000 * 100).toFixed(1);
   document.getElementById('eval-fill').style.setProperty('--pct', pct + '%');
@@ -416,8 +396,7 @@ socket.on('state_update', (d) => {
                               `${(score/100).toFixed(2)} Black`;
   document.getElementById('eval-label').textContent = 'Evaluation: ' + label;
 
-  // Move history
-  const hist = d.move_history || [];
+  const hist  = d.move_history || [];
   const pairs = [];
   for (let i = 0; i < hist.length; i += 2) {
     pairs.push({ num: i/2+1, w: hist[i], b: hist[i+1] || '' });
@@ -436,12 +415,10 @@ socket.on('state_update', (d) => {
     ml.scrollTop = ml.scrollHeight;
   }
 
-  // Theme selector sync
   const sel = document.getElementById('theme-select');
   if (sel.value !== d.theme) sel.value = d.theme;
 });
 
-// System info poll every 5s
 function fetchSysInfo() {
   fetch('/api/system').then(r => r.json()).then(d => {
     document.getElementById('sys-temp').textContent =
@@ -455,9 +432,9 @@ function fetchSysInfo() {
 fetchSysInfo();
 setInterval(fetchSysInfo, 5000);
 
-function newGame()   { socket.emit('new_game'); }
+function newGame()    { socket.emit('new_game'); }
 function requestHint(){ socket.emit('hint'); }
-function setTheme(t) { socket.emit('set_theme', { theme: t }); }
+function setTheme(t)  { socket.emit('set_theme', { theme: t }); }
 </script>
 </body>
 </html>

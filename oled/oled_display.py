@@ -1,22 +1,11 @@
-"""
-oled/oled_display.py
-SSD1306 128×64 I2C OLED driver for the Grove connector on the Jetson.
-
-Hardware:
-  Grove connector → Jetson 40-pin header
-    SCL → Pin 5  (I2C_GP5_CLK)
-    SDA → Pin 3  (I2C_GP5_DAT)
-    VCC → Pin 1  (3.3V)
-    GND → Pin 6  (GND)
-
-Default I2C address: 0x3C (most SSD1306 Grove OLEDs)
-If yours doesn't work try 0x3D — set OLED_I2C_ADDR env var.
-
-Install deps:
-  pip install luma.oled Pillow --break-system-packages
-
-Set MOCK_OLED=1 to run without hardware (logs instead of drawing).
-"""
+# =============================================================================
+# oled/oled_display.py
+# Author : Richard Pu
+# Created: 2026-06-10
+# Purpose: SSD1306 128×64 I2C OLED driver for the Grove connector on the
+#          Jetson. Renders idle clock, mode select, setup, game, hint,
+#          checkmate, and loading screens. Set MOCK_OLED=1 for headless use.
+# =============================================================================
 
 import os
 import time

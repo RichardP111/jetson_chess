@@ -1,19 +1,11 @@
-"""
-chess_engine/stockfish.py
-Stockfish UCI wrapper via python-chess.
-
-get_move() returns both the engine's move AND the best reply to that move,
-mirroring the original protocol where pisMove contained:
-  4-char move + pisSuggestedBestMove (chars 5 onward, i.e. pisMove.substring(5))
-
-is_legal() is the Python equivalent of checkPiForError() — called up to 30×
-by the main loop, though here a single call suffices since python-chess is local.
-Returns None on exception so caller can retry (matching the polling model).
-
-Install Stockfish:
-  sudo apt install stockfish
-  # or set STOCKFISH_PATH env var to point at the binary.
-"""
+# =============================================================================
+# chess_engine/stockfish.py
+# Author : Richard Pu
+# Created: 2026-06-10
+# Purpose: Stockfish UCI wrapper via python-chess. Returns both the engine move
+#          and a best-reply hint, mirroring the original Pi serial protocol.
+#          Set STOCKFISH_PATH env var to override the default binary location.
+# =============================================================================
 
 import os
 import logging

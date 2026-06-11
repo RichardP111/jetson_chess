@@ -1,13 +1,11 @@
-#!/usr/bin/env python3
-"""
-tests/test_mock_game.py
-Full mock integration test — no hardware, no Lichess token needed.
-Verifies all 18 features ported from ArdunioChess.ino.
-
-Run:
-  python3 tests/test_mock_game.py
-  (MOCK_LEDS/MOCK_BUTTONS/MOCK_ONLINE are forced on inside this file)
-"""
+# =============================================================================
+# tests/test_mock_game.py
+# Author : Richard Pu
+# Created: 2026-06-10
+# Purpose: Full mock integration test covering all 18 features ported from
+#          ArdunioChess.ino. No hardware, Lichess token, or Stockfish required
+#          — all drivers run in mock mode automatically.
+# =============================================================================
 
 import os, sys, unittest.mock as mock, builtins
 

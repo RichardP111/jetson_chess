@@ -1,26 +1,12 @@
-"""
-ui/animations.py
-Enhanced LED animations and themes for the Smart Chess Board.
-
-All animations run on the chessboard WS2812b strip.
-Everything here is additive to display.py — imported and called from main.py.
-
-Themes:
-  - classic    : original white/black (default)
-  - fire       : warm amber/red squares
-  - ocean      : deep blue/teal squares
-  - forest     : dark green/cream squares
-  - neon       : electric purple/cyan squares
-
-Effects:
-  - move_trail         : fading ghost trail from source to destination
-  - piece_pulse        : gentle breathe effect on all occupied squares
-  - check_alert        : rapid red pulse around king square
-  - rainbow_victory    : full board rainbow sweep on game win
-  - thinking_spinner   : rotating dot around board edge while engine thinks
-  - board_wipe         : wipe transition between screens
-  - rain_effect        : cascading green drops (Matrix-style)
-"""
+# =============================================================================
+# ui/animations.py
+# Author : Richard Pu
+# Created: 2026-06-10
+# Purpose: Enhanced LED animations and themes for the chessboard strip.
+#          Provides move trails, piece pulse, check alert, rainbow victory,
+#          thinking spinner, board wipe, and Matrix rain effect. Five built-in
+#          themes: classic, fire, ocean, forest, neon.
+# =============================================================================
 
 import time
 import math
