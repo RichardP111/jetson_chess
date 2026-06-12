@@ -11,6 +11,7 @@ import time
 import subprocess
 import threading
 import logging
+from typing import Optional
 
 import chess
 import chess.svg
@@ -81,7 +82,7 @@ def register_callbacks(**kw):
             _callbacks[k] = v
 
 
-def start_server(host: str = None, port: int = None):
+def start_server(host: Optional[str] = None, port: Optional[int] = None):
     h = host or CFG.web_host
     p = port or CFG.web_port
     t = threading.Thread(
@@ -226,8 +227,8 @@ def api_update():
 
 @socketio.on("connect")
 def on_connect():
-    log.info(f"Dashboard client connected: {request.sid}")
-    _push_state()
+  log.info(f"Dashboard client connected: {getattr(request, 'sid', '')}")
+  _push_state()
 
 @socketio.on("new_game")
 def on_new_game():

@@ -11,7 +11,7 @@ import os
 import time
 import logging
 import threading
-from typing import Optional
+from typing import Any, Literal, Optional
 
 log = logging.getLogger(__name__)
 
@@ -35,11 +35,11 @@ class LichessClient:
         self._colour: Optional[str]  = None
         self._pending_move: Optional[str] = None
         self._move_event = threading.Event()
+        self._client: Any = None
+        self._board_client: Any = None
 
         if MOCK_ONLINE:
             log.warning("LichessClient running in MOCK mode — no real games.")
-            self._client       = None
-            self._board_client = None
             return
 
         session            = berserk.TokenSession(LICHESS_TOKEN)
@@ -63,11 +63,12 @@ class LichessClient:
 
         log.info(f"Seeking Lichess game as {colour}...")
         try:
+            color: Literal["white", "black"] = "black" if colour == "black" else "white"
             game = self._client.challenges.create_ai(
                 level=1,
                 clock_limit=600,
                 clock_increment=0,
-                color=colour,
+                color=color,
             )
             self._game_id = game["id"]
             log.info(f"Lichess game started: {self._game_id}")
@@ -81,7 +82,13 @@ class LichessClient:
             log.info(f"[MOCK] Sent move to Lichess: {uci}")
             return
         try:
-            self._board_client.make_move(self._game_id, uci)
+            board_client = self._board_client
+            if board_client is None:
+                raise RuntimeError("Lichess board client is not initialized")
+            game_id = self._game_id
+            if game_id is None:
+                raise RuntimeError("Lichess game is not initialized")
+            board_client.make_move(game_id, uci)
             log.info(f"Move sent to Lichess: {uci}")
         except Exception as e:
             log.error(f"Failed to send move {uci}: {e}")
@@ -109,7 +116,13 @@ class LichessClient:
         if not self._game_id or MOCK_ONLINE:
             return
         try:
-            for event in self._board_client.stream_game_state(self._game_id):
+            board_client = self._board_client
+            if board_client is None:
+                raise RuntimeError("Lichess board client is not initialized")
+            game_id = self._game_id
+            if game_id is None:
+                raise RuntimeError("Lichess game is not initialized")
+            for event in board_client.stream_game_state(game_id):
                 etype = event.get("type")
                 if etype == "gameState":
                     moves = event.get("moves", "").split()

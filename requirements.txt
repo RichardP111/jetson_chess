@@ -28,9 +28,9 @@ python-dotenv>=1.0.0
 pytest>=8.0.0
 
 # Voice announcements (optional — install one of:)
-#   sudo apt install espeak-ng -y          ← preferred (offline, fast)
-#   pip install pyttsx3 --break-system-packages  ← Python fallback
+sudo apt install espeak-ng 
+# pip install pyttsx3 --break-system-packages  ← Python fallback
 # pyttsx3>=2.90
 
 # Jetson GPIO (pre-installed on JetPack, listed here for reference)
-# Jetson.GPIO>=2.1.6
+Jetson.GPIO>=2.1.6

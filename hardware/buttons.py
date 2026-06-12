@@ -34,7 +34,7 @@ if MOCK:
         """Keyboard-driven stub: type 1-9 or 'h' + Enter."""
 
         BOARD   = "BOARD"
-        IN      = "IN"
+        IN      = 1
         PUD_UP  = "PUD_UP"
         FALLING = "FALLING"
 
@@ -94,11 +94,11 @@ if MOCK:
 
 class ButtonController:
     def __init__(self):
-        GPIO.setmode(GPIO.BOARD)
+        GPIO.setmode(GPIO.BOARD)  # type: ignore[arg-type]
         GPIO.setwarnings(False)
         for pin in CFG.button_pins.values():
-            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.setup(CFG.hint_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # type: ignore[arg-type]
+        GPIO.setup(CFG.hint_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP) # type: ignore[arg-type]
         self._hint_callback: Optional[Callable] = None
         self._last_hint_time = 0.0
         log.info("ButtonController ready")
@@ -113,7 +113,7 @@ class ButtonController:
         self._hint_callback = callback
         GPIO.add_event_detect(
             CFG.hint_pin,
-            GPIO.FALLING,
+            GPIO.FALLING,  # type: ignore[arg-type]
             callback=self._raw_hint_handler,
             bouncetime=200,
         )

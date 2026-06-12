@@ -75,7 +75,10 @@ class StockfishEngine:
         try:
             board = chess.Board(fen)
             info  = self._engine.analyse(board, chess.engine.Limit(time=time_s))
-            score = info["score"].white().score(mate_score=10_000)
+            score_obj = info.get("score")
+            if score_obj is None:
+                return 0
+            score = score_obj.white().score(mate_score=10_000)
             return score if score is not None else 0
         except Exception as e:
             log.warning(f"evaluate() error: {e}")

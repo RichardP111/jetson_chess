@@ -59,21 +59,21 @@ class ChessGame:
 
         load_dotenv()
 
-        self.leds      = LEDController()
-        self.buttons   = ButtonController()
-        self.board     = BoardState()
-        self.display   = Display(self.leds, self.board, self.buttons)
-        self.anim      = AnimationEngine(self.leds, self.board)
-        self.oled      = OLEDDisplay()
+        self.leds = LEDController()
+        self.buttons = ButtonController()
+        self.board = BoardState()
+        self.display = Display(self.leds, self.board, self.buttons)
+        self.anim = AnimationEngine(self.leds, self.board)
+        self.oled = OLEDDisplay()
         self.stockfish = StockfishEngine()
-        self.lichess   = LichessClient()
+        self.lichess = LichessClient()
 
-        self.game_mode           = None
-        self.colour_choice       = None
-        self.difficulty          = CFG.difficulty_default
-        self.move_timeout_ms     = CFG.movetime_default_ms
+        self.game_mode = None
+        self.colour_choice = None
+        self.difficulty = CFG.difficulty_default
+        self.move_timeout_ms = CFG.movetime_default_ms
         self.suggested_best_move = ""
-        self._voice_enabled      = voice.available
+        self._voice_enabled = voice.available
 
         # Per-player clocks (elapsed seconds)
         self._clock = {"White": 0.0, "Black": 0.0}
@@ -82,21 +82,21 @@ class ChessGame:
 
         self._new_game_requested = threading.Event()
         self._web_move_queue: list = []
-        self._web_move_event  = threading.Event()
+        self._web_move_event = threading.Event()
 
         web_server.register_callbacks(
-            new_game     = self._new_game_sequence,
-            hint         = lambda: self._hint_isr(None),
-            set_theme    = self.anim.set_theme,
-            move_input   = self._web_move_received,
-            undo         = self._undo_sequence,
-            save_usb     = self._save_to_usb,
-            toggle_voice = self._toggle_voice,
+            new_game=self._new_game_sequence,
+            hint=lambda: self._hint_isr(None),
+            set_theme=self.anim.set_theme,
+            move_input=self._web_move_received,
+            undo=self._undo_sequence,
+            save_usb=self._save_to_usb,
+            toggle_voice=self._toggle_voice,
         )
         web_server.start_server()
         web_server.update_state(voice_enabled=self._voice_enabled)
 
-        signal.signal(signal.SIGINT,  self._shutdown)
+        signal.signal(signal.SIGINT, self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
         self.buttons.register_hint_callback(self._hint_isr)
 
@@ -132,8 +132,9 @@ class ChessGame:
         self._setup_game()
         self.anim.show_board_themed()
         self.oled.show_game(self._current_turn(), status="Game ready!")
-        web_server.update_state(game_active=True, status="Game started",
-                                usb_available=usb.is_available())
+        web_server.update_state(
+            game_active=True, status="Game started", usb_available=usb.is_available()
+        )
 
     def _game_loop(self):
         while True:
@@ -141,10 +142,14 @@ class ChessGame:
                 raise _NewGameException()
 
             current = self._current_turn()
-            self.oled.show_game(current, status="Your move...",
-                                eval_score=self.stockfish.evaluate(self.board.fen()))
-            web_server.update_state(whose_turn=current, status="Your move",
-                                    usb_available=usb.is_available())
+            self.oled.show_game(
+                current,
+                status="Your move...",
+                eval_score=self.stockfish.evaluate(self.board.fen()),
+            )
+            web_server.update_state(
+                whose_turn=current, status="Your move", usb_available=usb.is_available()
+            )
 
             if voice.available and self._voice_enabled:
                 voice.announce_status(f"{current}'s turn")
@@ -172,27 +177,31 @@ class ChessGame:
                     voice.announce_status("Illegal move, try again")
                 continue
 
-            captured   = self.board.is_capture(humans_move)
+            captured = self.board.is_capture(humans_move)
             self.board.apply_move(humans_move)
             self._push_move_to_ui(humans_move, "Human")
 
             # ── Check detection ────────────────────────────────────────────
             cb = _chess.Board(self.board.fen())
-            is_check     = cb.is_check()
+            is_check = cb.is_check()
             is_checkmate = cb.is_checkmate()
 
             if is_check and not is_checkmate:
                 king_sq = cb.king(cb.turn)
-                self.anim.check_alert(king_sq % 8, 7 - (king_sq // 8))
+                if king_sq is not None:
+                    self.anim.check_alert(king_sq % 8, 7 - (king_sq // 8))
                 self.oled.show_status("CHECK!")
                 web_server.update_state(status="CHECK!")
                 if self._voice_enabled:
                     voice.announce_status("Check!")
 
             if self._voice_enabled:
-                voice.announce_move(humans_move, captured=captured,
-                                    is_check=is_check and not is_checkmate,
-                                    is_checkmate=is_checkmate)
+                voice.announce_move(
+                    humans_move,
+                    captured=captured,
+                    is_check=is_check and not is_checkmate,
+                    is_checkmate=is_checkmate,
+                )
 
             self.anim.show_board_themed()
 
@@ -206,8 +215,11 @@ class ChessGame:
             elif self.game_mode == "LocalHuman":
                 # Just swap turns; the other human uses the same input loop
                 next_turn = self._current_turn()
-                self.oled.show_game(next_turn, status=f"Pass to {next_turn}",
-                                    move_history=self.board._move_history_uci())
+                self.oled.show_game(
+                    next_turn,
+                    status=f"Pass to {next_turn}",
+                    move_history=self.board._move_history_uci(),
+                )
                 if self._voice_enabled:
                     voice.announce_status(f"Pass to {next_turn}")
                 # Brief pause so the player can hand over the board
@@ -216,8 +228,11 @@ class ChessGame:
             self.anim.show_board_themed()
             self.oled.show_game(
                 self._current_turn(),
-                last_move=self.board._move_history_uci()[-1]
-                          if self.board._move_history_uci() else "",
+                last_move=(
+                    self.board._move_history_uci()[-1]
+                    if self.board._move_history_uci()
+                    else ""
+                ),
                 move_history=self.board._move_history_uci(),
                 eval_score=self.stockfish.evaluate(self.board.fen()),
             )
@@ -255,18 +270,22 @@ class ChessGame:
         self.board.apply_move(engine_move)
         self._push_move_to_ui(engine_move, "Computer")
 
-        cb_after    = _chess.Board(self.board.fen())
-        is_check    = cb_after.is_check()
-        is_checkmate= cb_after.is_checkmate()
+        cb_after = _chess.Board(self.board.fen())
+        is_check = cb_after.is_check()
+        is_checkmate = cb_after.is_checkmate()
 
         if self._voice_enabled:
-            voice.announce_move(engine_move, captured=captured_by_engine,
-                                is_check=is_check and not is_checkmate,
-                                is_checkmate=is_checkmate)
+            voice.announce_move(
+                engine_move,
+                captured=captured_by_engine,
+                is_check=is_check and not is_checkmate,
+                is_checkmate=is_checkmate,
+            )
 
         if is_check and not is_checkmate:
             king_sq = cb_after.king(cb_after.turn)
-            self.anim.check_alert(king_sq % 8, 7 - (king_sq // 8))
+            if king_sq is not None:
+                self.anim.check_alert(king_sq % 8, 7 - (king_sq // 8))
             self.oled.show_status("CHECK!")
             web_server.update_state(status="CHECK!")
 
@@ -336,9 +355,9 @@ class ChessGame:
             if self._voice_enabled:
                 voice.announce_status("Press buttons 1 to 8 to set difficulty")
             btn = self.buttons.detect_button()
-            self.difficulty = self._map_range(btn, 1, 8,
-                                              CFG.difficulty_min,
-                                              CFG.difficulty_max)
+            self.difficulty = self._map_range(
+                btn, 1, 8, CFG.difficulty_min, CFG.difficulty_max
+            )
             self.oled.show_setup_difficulty(self.difficulty)
             web_server.update_state(difficulty=self.difficulty)
             time.sleep(0.3)
@@ -348,9 +367,9 @@ class ChessGame:
             if self._voice_enabled:
                 voice.announce_status("Press buttons 1 to 8 to set move time")
             btn = self.buttons.detect_button()
-            self.move_timeout_ms = self._map_range(btn, 1, 8,
-                                                   CFG.movetime_min_ms,
-                                                   CFG.movetime_max_ms)
+            self.move_timeout_ms = self._map_range(
+                btn, 1, 8, CFG.movetime_min_ms, CFG.movetime_max_ms
+            )
             self.oled.show_setup_timeout(self.move_timeout_ms)
             time.sleep(0.3)
 
@@ -417,7 +436,9 @@ class ChessGame:
             return
 
         # In Stockfish mode undo 2 half-moves; in other modes undo 1
-        count = 2 if self.game_mode == "Stockfish" and self.board.move_count() >= 2 else 1
+        count = (
+            2 if self.game_mode == "Stockfish" and self.board.move_count() >= 2 else 1
+        )
         undone = self.board.undo_half_moves(count)
 
         self.anim.undo_sweep()
@@ -428,8 +449,11 @@ class ChessGame:
             move_history=self.board._move_history_uci(),
             whose_turn=self._current_turn(),
             status=f"Undid {undone} half-move(s)",
-            last_move=self.board._move_history_uci()[-1]
-                      if self.board._move_history_uci() else None,
+            last_move=(
+                self.board._move_history_uci()[-1]
+                if self.board._move_history_uci()
+                else None
+            ),
         )
         if self._voice_enabled:
             voice.announce_status(f"Undone. {self._current_turn()}'s turn.")
@@ -476,14 +500,16 @@ class ChessGame:
                     # Find the best move at the position before this move
                     brd_before = _chess.Board(board.fen())
                     brd_before.pop()
-                    _, best = self.stockfish.get_move(brd_before.fen(),
-                                                       skill_level=20,
-                                                       movetime_ms=200)
-                    blunders.append({
-                        "move": uci,
-                        "loss": int(loss),
-                        "best": best or "?",
-                    })
+                    _, best = self.stockfish.get_move(
+                        brd_before.fen(), skill_level=20, movetime_ms=200
+                    )
+                    blunders.append(
+                        {
+                            "move": uci,
+                            "loss": int(loss),
+                            "best": best or "?",
+                        }
+                    )
                 prev_score = score
             except Exception:
                 pass
@@ -534,7 +560,7 @@ class ChessGame:
             self.leds.control_panel_fill((255, 255, 255), start=0, count=4)
             self.leds.panel_show()
             move_from = self._get_coordinates(btn)
-            move_to   = self._get_coordinates(0)
+            move_to = self._get_coordinates(0)
             btn = 0
             humans_move = move_from + move_to
             self.leds.control_panel_set_pixel(4, (255, 255, 255))
@@ -551,7 +577,11 @@ class ChessGame:
                         self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
                         self.leds.panel_show()
                         return web_uci
-                btn = self.buttons.detect_button() if not self._web_move_event.is_set() else 0
+                btn = (
+                    self.buttons.detect_button()
+                    if not self._web_move_event.is_set()
+                    else 0
+                )
             if btn == 9:
                 self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
                 self.leds.panel_show()
@@ -560,14 +590,15 @@ class ChessGame:
                 self.anim.show_board_themed()
 
     def _get_coordinates(self, already_pressed: int = 0) -> str:
-        col_map = {1: "a", 2: "b", 3: "c", 4: "d",
-                   5: "e", 6: "f", 7: "g", 8: "h"}
-        row_map = {1: "1", 2: "2", 3: "3", 4: "4",
-                   5: "5", 6: "6", 7: "7", 8: "8"}
+        col_map = {1: "a", 2: "b", 3: "c", 4: "d", 5: "e", 6: "f", 7: "g", 8: "h"}
+        row_map = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8"}
         column = None
         while column is None:
-            btn    = (already_pressed if already_pressed != 0
-                      else self.buttons.detect_button())
+            btn = (
+                already_pressed
+                if already_pressed != 0
+                else self.buttons.detect_button()
+            )
             already_pressed = 0
             column = col_map.get(btn)
         time.sleep(0.3)
@@ -670,12 +701,12 @@ class ChessGame:
 
     def _start_clock(self, colour: str):
         self._active_colour = colour
-        self._clock_start   = time.time()
+        self._clock_start = time.time()
 
     def _stop_clock(self, colour: str):
         if self._clock_start is not None:
             self._clock[colour] += time.time() - self._clock_start
-            self._clock_start   = None
+            self._clock_start = None
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -684,8 +715,8 @@ class ChessGame:
         return "White" if b.turn == _chess.WHITE else "Black"
 
     def _push_move_to_ui(self, uci: str, player: str):
-        history    = self.board._move_history_uci()
-        whose      = self._current_turn()
+        history = self.board._move_history_uci()
+        whose = self._current_turn()
         eval_score = self.stockfish.evaluate(self.board.fen())
         self.oled.push_move(uci, whose, eval_score=eval_score)
         web_server.update_state(
@@ -699,8 +730,7 @@ class ChessGame:
 
     @staticmethod
     def _map_range(value, in_min, in_max, out_min, out_max):
-        return int((value - in_min) * (out_max - out_min) /
-                   (in_max - in_min) + out_min)
+        return int((value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
 
     def _shutdown(self, *args):
         log.info("Shutting down...")

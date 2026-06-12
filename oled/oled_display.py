@@ -56,28 +56,31 @@ if MOCK:
         def line(self, *a, **k):      pass
         def ellipse(self, *a, **k):   pass
 
-    def _make_device():
+    def _make_mock_device():
         log.debug("[MOCK OLED] device created")
         return _FakeDevice()
 
     canvas = _FakeCanvas  # noqa: F811
     Image  = None
 
-    def _load_font(size=10):
+    def _load_mock_font(size=10):
         return None
 
 else:
-    def _make_device():
+    def _make_hw_device():
         serial = i2c(port=CFG.oled_i2c_port, address=CFG.oled_i2c_addr)
         return ssd1306(serial, width=CFG.oled_width, height=CFG.oled_height)
 
-    def _load_font(size=10):
+    def _load_hw_font(size=10):
         try:
             return ImageFont.truetype(
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size
             )
         except Exception:
             return ImageFont.load_default()
+
+_make_device = _make_mock_device if MOCK else _make_hw_device
+_load_font = _load_mock_font if MOCK else _load_hw_font
 
 
 W, H = CFG.oled_width, CFG.oled_height
@@ -163,7 +166,7 @@ class OLEDDisplay:
         self,
         whose_turn: str,
         last_move: str = "",
-        move_history: list = None,
+        move_history: list | None = None,
         status: str = "",
         eval_score: int = 0,
     ):

@@ -9,7 +9,7 @@ import time
 import math
 import logging
 import threading
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 from hardware.leds import LEDController
 from chess_engine.board_state import BoardState
@@ -132,7 +132,7 @@ class AnimationEngine:
 
     # ── Piece pulse ───────────────────────────────────────────────────────────
 
-    def piece_pulse(self, color: Color = None, cycles: int = 2, duration: float = 1.0):
+    def piece_pulse(self, color: Optional[Color] = None, cycles: int = 2, duration: float = 1.0):
         if color is None:
             color = self._theme["move"]
         steps = 30
