@@ -1,10 +1,10 @@
 # =============================================================================
 # hardware/leds.py
 # Author : Richard Pu
-# Created: 2026-06-10
+# Created: 2026-06-10  |  Revised: 2026-06-12
 # Purpose: WS2812b LED control for the Jetson Orin Nano smart chessboard.
 #          Manages two LED strips — 64-pixel chessboard and 22-pixel control
-#          panel. The chessboard strip brightness is capped at ~30% (76/255)
+#          panel. The chessboard strip brightness is capped at ~30 % (76/255)
 #          to prevent overcurrent damage to the micro-USB connector.
 #          Control panel strip is disabled pending hardware availability.
 # Env   : Set MOCK_LEDS=1 to run without physical hardware (logs calls only).
@@ -14,23 +14,11 @@ import os
 import logging
 from typing import Tuple
 
+from config import CFG
+
 log = logging.getLogger(__name__)
 
 MOCK = os.environ.get("MOCK_LEDS", "0") == "1"
-
-CHESS_LED_PIN        = 32
-CHESS_LED_COUNT      = 64
-CHESS_LED_BRIGHTNESS = 76   # ~30% of 255 — prevents micro-USB overcurrent
-CHESS_LED_CHANNEL    = 0
-
-PANEL_LED_PIN        = 33
-PANEL_LED_COUNT      = 22
-PANEL_LED_BRIGHTNESS = 0
-PANEL_LED_CHANNEL    = 1
-
-LED_FREQ_HZ = 800_000
-LED_DMA     = 10
-LED_INVERT  = False
 
 if not MOCK:
     try:
@@ -49,7 +37,7 @@ if MOCK:
             return (r << 16) | (g << 8) | b
 
     class PixelStrip:  # noqa: F811
-        def __init__(self, count, pin, freq=800000, dma=10, invert=False,
+        def __init__(self, count, pin, freq=800_000, dma=10, invert=False,
                      brightness=255, channel=0):
             self._count      = count
             self._pixels     = [0] * count
@@ -97,19 +85,19 @@ class LEDController:
 
     def __init__(self):
         self.chess = PixelStrip(
-            CHESS_LED_COUNT,
-            CHESS_LED_PIN,
-            LED_FREQ_HZ,
-            LED_DMA,
-            LED_INVERT,
-            CHESS_LED_BRIGHTNESS,
-            CHESS_LED_CHANNEL,
+            CFG.chess_led_count,
+            CFG.chess_led_pin,
+            CFG.led_freq_hz,
+            CFG.led_dma,
+            CFG.led_invert,
+            CFG.chess_led_brightness,
+            CFG.chess_led_channel,
         )
         # Control panel strip is disabled — hardware not present.
-        # Re-enable by uncommenting the four lines below and the panel.begin() call.
+        # Re-enable by setting CFG.panel_led_brightness > 0 and uncommenting below.
         # self.panel = PixelStrip(
-        #     PANEL_LED_COUNT, PANEL_LED_PIN, LED_FREQ_HZ, LED_DMA,
-        #     LED_INVERT, PANEL_LED_BRIGHTNESS, PANEL_LED_CHANNEL,
+        #     CFG.panel_led_count, CFG.panel_led_pin, CFG.led_freq_hz, CFG.led_dma,
+        #     CFG.led_invert, CFG.panel_led_brightness, CFG.panel_led_channel,
         # )
         self.panel = None
 
@@ -133,8 +121,8 @@ class LEDController:
 
     def chess_fill(self, color: Tuple[int, int, int], start: int = 0, count: int = 0):
         c   = _rgb(*color)
-        end = (start + count) if count else CHESS_LED_COUNT
-        for i in range(start, min(end, CHESS_LED_COUNT)):
+        end = (start + count) if count else CFG.chess_led_count
+        for i in range(start, min(end, CFG.chess_led_count)):
             self.chess.setPixelColor(i, c)
 
     def chess_fill_rect(self, x: int, y: int, w: int, h: int,
@@ -193,8 +181,8 @@ class LEDController:
         if self.panel is None:
             return
         c   = _rgb(*color)
-        end = (start + count) if count else PANEL_LED_COUNT
-        for i in range(start, min(end, PANEL_LED_COUNT)):
+        end = (start + count) if count else CFG.panel_led_count
+        for i in range(start, min(end, CFG.panel_led_count)):
             self.panel.setPixelColor(i, c)
 
     def panel_show(self):

@@ -7,9 +7,6 @@ python-chess>=1.10.0
 # WS2812b LED control (requires root or udev rule — see scripts/99-ws281x.rules)
 rpi_ws281x>=4.3.4
 
-# Jetson GPIO (pre-installed on JetPack, listed here for reference)
-# Jetson.GPIO>=2.1.6
-
 # Lichess API client
 berserk>=0.13.1
 
@@ -23,3 +20,17 @@ flask-socketio>=5.3.6
 
 # System monitoring (optional, for web dashboard system stats)
 psutil>=5.9.0
+
+# .env loading
+python-dotenv>=1.0.0
+
+# Testing
+pytest>=8.0.0
+
+# Voice announcements (optional — install one of:)
+#   sudo apt install espeak-ng -y          ← preferred (offline, fast)
+#   pip install pyttsx3 --break-system-packages  ← Python fallback
+# pyttsx3>=2.90
+
+# Jetson GPIO (pre-installed on JetPack, listed here for reference)
+# Jetson.GPIO>=2.1.6

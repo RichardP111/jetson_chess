@@ -1,7 +1,7 @@
 # =============================================================================
 # online/lichess.py
 # Author : Richard Pu
-# Created: 2026-06-10
+# Created: 2026-06-10  |  Revised: 2026-06-12
 # Purpose: Lichess board API integration via berserk. Handles game creation,
 #          move submission, and opponent move streaming. Falls back to mock
 #          mode if LICHESS_TOKEN is unset or MOCK_ONLINE=1 is set.
@@ -16,8 +16,7 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 LICHESS_TOKEN = os.environ.get("LICHESS_TOKEN", "")
-MOCK_ONLINE = os.environ.get("MOCK_ONLINE", "0") == "1" or not LICHESS_TOKEN
-
+MOCK_ONLINE   = os.environ.get("MOCK_ONLINE", "0") == "1" or not LICHESS_TOKEN
 
 if not MOCK_ONLINE:
     try:
@@ -25,7 +24,7 @@ if not MOCK_ONLINE:
     except ImportError:
         log.warning(
             "berserk not found — online play disabled. "
-            "Install with: pip install berserk"
+            "Install with: pip install berserk --break-system-packages"
         )
         MOCK_ONLINE = True
 
@@ -33,18 +32,18 @@ if not MOCK_ONLINE:
 class LichessClient:
     def __init__(self):
         self._game_id: Optional[str] = None
-        self._colour: Optional[str] = None
+        self._colour: Optional[str]  = None
         self._pending_move: Optional[str] = None
         self._move_event = threading.Event()
 
         if MOCK_ONLINE:
             log.warning("LichessClient running in MOCK mode — no real games.")
-            self._client = None
+            self._client       = None
             self._board_client = None
             return
 
-        session = berserk.TokenSession(LICHESS_TOKEN)
-        self._client = berserk.Client(session=session)
+        session            = berserk.TokenSession(LICHESS_TOKEN)
+        self._client       = berserk.Client(session=session)
         self._board_client = berserk.clients.Board(session=session)
         log.info("LichessClient connected")
 
@@ -53,7 +52,7 @@ class LichessClient:
     def start_game(self, colour: str = "white"):
         """
         Challenge the Lichess AI (level 1) or seek a human game.
-        Modify this to seek a real human game or use a specific challenge ID.
+        Modify clock_limit / clock_increment for different time controls.
         """
         self._colour = colour
 
@@ -62,10 +61,8 @@ class LichessClient:
             log.info(f"[MOCK] Lichess game started as {colour}")
             return
 
-        # Seek an open game (rated=False, time control 10+0 rapid)
         log.info(f"Seeking Lichess game as {colour}...")
         try:
-            # This creates an open seek — adjust time_limit / increment as needed
             game = self._client.challenges.create_ai(
                 level=1,
                 clock_limit=600,
@@ -116,11 +113,9 @@ class LichessClient:
                 etype = event.get("type")
                 if etype == "gameState":
                     moves = event.get("moves", "").split()
-                    # The latest move is ours if even-indexed (white), odd if black
                     if moves:
-                        last_move = moves[-1]
-                        # Only surface opponent's moves
-                        our_turn_index = 0 if self._colour == "white" else 1
+                        last_move        = moves[-1]
+                        our_turn_index   = 0 if self._colour == "white" else 1
                         if len(moves) % 2 != our_turn_index:
                             self._pending_move = last_move
                             self._move_event.set()

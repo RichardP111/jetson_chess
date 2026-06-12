@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 
 # Environment variables / API Keys
 .env
@@ -9,5 +10,10 @@ __pycache__/
 # Logs
 *.log
 
+# pytest cache
+.pytest_cache/
+.cache/
+
 # System files
 .DS_Store
+Thumbs.db

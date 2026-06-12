@@ -1,31 +1,30 @@
 # =============================================================================
 # ui/display.py
 # Author : Richard Pu
-# Created: 2026-06-10
-# Purpose: LED animations and board display logic for the smart chessboard.
-#          Ports all visual functions from ArdunioChess.ino with exact timing
-#          and pixel addressing. Game-mode confirmation flashes now target the
-#          full 64-LED chessboard (green = AI, blue = online) rather than the
-#          control-panel buttons, which are currently disabled.
+# Created: 2026-06-10  |  Revised: 2026-06-12
+# Purpose: LED board display logic. Ports all visual functions from the
+#          original Arduino sketch and adds new promotion-choice display and
+#          undo indicator.
 # =============================================================================
 
 import time
 import logging
 from hardware.leds import LEDController
 from chess_engine.board_state import BoardState
+from config import CFG
 
 log = logging.getLogger(__name__)
 
-BLACK    = (0,   0,   0)
-WHITE    = (255, 255, 255)
-DIM_WHITE = (10, 10,  10)
-RED      = (255, 0,   0)
-GREEN    = (0,   255, 0)
-BLUE     = (0,   0,   255)
-CYAN     = (0,   255, 255)
-MAGENTA  = (255, 0,   255)
-YELLOW   = (255, 255, 0)
-ORANGE   = (255, 165, 0)
+BLACK     = (0,   0,   0)
+WHITE     = (255, 255, 255)
+DIM_WHITE = (10,  10,  10)
+RED       = (255, 0,   0)
+GREEN     = (0,   255, 0)
+BLUE      = (0,   0,   255)
+CYAN      = (0,   255, 255)
+MAGENTA   = (255, 0,   255)
+YELLOW    = (255, 255, 0)
+ORANGE    = (255, 165, 0)
 
 
 class Display:
@@ -76,10 +75,10 @@ class Display:
             self.leds.chess_show()
             time.sleep(0.025)
 
-    # ── Game-mode confirmation flashes (full chessboard) ──────────────────
+    # ── Game-mode confirmation flashes ────────────────────────────────────
 
     def confirm_ai_mode(self, flashes: int = 2):
-        """Flash the entire 64-LED chessboard GREEN to confirm AI (Stockfish) mode."""
+        """Flash full chessboard GREEN to confirm AI (Stockfish) mode."""
         for _ in range(flashes):
             self.leds.chess_fill(GREEN)
             self.leds.chess_show()
@@ -89,9 +88,23 @@ class Display:
             time.sleep(0.5)
 
     def confirm_online_mode(self, flashes: int = 2):
-        """Flash the entire 64-LED chessboard BLUE to confirm Online (Lichess) mode."""
+        """Flash full chessboard BLUE to confirm Online (Lichess) mode."""
         for _ in range(flashes):
             self.leds.chess_fill(BLUE)
+            self.leds.chess_show()
+            time.sleep(0.5)
+            self.leds.chess_fill(BLACK)
+            self.leds.chess_show()
+            time.sleep(0.5)
+
+    def confirm_local_mode(self, flashes: int = 2):
+        """Flash left-half white / right-half yellow to confirm local 2P mode."""
+        for _ in range(flashes):
+            for row in range(8):
+                for col in range(4):
+                    self.leds.chess_set_pixel(col, row, WHITE)
+                for col in range(4, 8):
+                    self.leds.chess_set_pixel(col, row, YELLOW)
             self.leds.chess_show()
             time.sleep(0.5)
             self.leds.chess_fill(BLACK)
@@ -107,9 +120,7 @@ class Display:
         mode:
           'Y' — show and continue immediately
           'N' — wait for OK button (btn 9) before proceeding
-          'H' — hint in CYAN, auto-dismiss after 4 seconds
-
-        If the destination square is occupied a RED capture flash plays first.
+          'H' — hint in CYAN, auto-dismiss after CFG.hint_dismiss_s seconds
         """
         if len(uci) < 4:
             log.warning(f"light_up_move: UCI too short: {uci!r}")
@@ -147,7 +158,37 @@ class Display:
             self.leds.panel_show()
 
         elif mode == "H":
-            time.sleep(4.0)
+            time.sleep(CFG.hint_dismiss_s)
+
+    # ── Promotion display ──────────────────────────────────────────────────
+
+    def show_promotion_choices(self):
+        """
+        Display four coloured quadrants for promotion piece selection:
+          Top-left  (Q)  = white
+          Top-right (R)  = red
+          Bot-left  (B)  = blue
+          Bot-right (N)  = yellow
+        Buttons 1-4 select the piece.
+        """
+        self.leds.chess_fill(BLACK)
+        # Q — white — top-left 4×4
+        for row in range(4):
+            for col in range(4):
+                self.leds.chess_set_pixel(col, row, WHITE)
+        # R — red — top-right 4×4
+        for row in range(4):
+            for col in range(4, 8):
+                self.leds.chess_set_pixel(col, row, RED)
+        # B — blue — bottom-left 4×4
+        for row in range(4, 8):
+            for col in range(4):
+                self.leds.chess_set_pixel(col, row, BLUE)
+        # N — yellow — bottom-right 4×4
+        for row in range(4, 8):
+            for col in range(4, 8):
+                self.leds.chess_set_pixel(col, row, YELLOW)
+        self.leds.chess_show()
 
     # ── Error animation ────────────────────────────────────────────────────
 
@@ -192,18 +233,30 @@ class Display:
         self.leds.chess_show()
 
     def show_timeout_icon(self):
-        """'!' shape in MAGENTA — shown during timeout selection."""
+        """Exclamation mark in MAGENTA — shown during timeout selection."""
         self.leds.chess_fill(BLACK)
         self.leds.chess_fast_vline(x=3, y=2, h=5, color=MAGENTA)
         self.leds.chess_fast_hline(x=2, y=2, w=3, color=MAGENTA)
         self.leds.chess_show()
 
     def show_colour_choice_icon(self):
-        """Left half bright white (white pieces), right half dim (black pieces)."""
+        """Left half bright white, right half dim — white vs black side."""
         self.leds.chess_fill(BLACK)
         for row in range(8):
             for col in range(4):
                 self.leds.chess_set_pixel(col, row, WHITE)
             for col in range(4, 8):
                 self.leds.chess_set_pixel(col, row, DIM_WHITE)
+        self.leds.chess_show()
+
+    def show_undo_icon(self):
+        """Orange left-arrow on the board — shown briefly after undo."""
+        self.leds.chess_fill(BLACK)
+        # Arrow shaft row 3
+        for col in range(2, 7):
+            self.leds.chess_set_pixel(col, 3, ORANGE)
+        # Arrowhead
+        self.leds.chess_set_pixel(1, 3, ORANGE)
+        self.leds.chess_set_pixel(2, 2, ORANGE)
+        self.leds.chess_set_pixel(2, 4, ORANGE)
         self.leds.chess_show()

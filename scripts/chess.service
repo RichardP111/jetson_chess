@@ -9,6 +9,17 @@
 #
 # Logs:
 #   sudo journalctl -u chess.service -f
+#
+# OTA updates from the web dashboard require OTA_TOKEN to be set in .env.
+# Generate one with:
+#   python3 -c "import secrets; print(secrets.token_hex(16))"
+#
+# MOCK flags (set in .env for headless / development use):
+#   MOCK_LEDS=1    — disable physical LED strips
+#   MOCK_BUTTONS=1 — use keyboard input instead of GPIO
+#   MOCK_OLED=1    — disable physical OLED (no i2c required)
+#   MOCK_VOICE=1   — log TTS phrases instead of speaking
+#   MOCK_ONLINE=1  — stub Lichess client
 
 [Unit]
 Description=Jetson Smart Chess Board
