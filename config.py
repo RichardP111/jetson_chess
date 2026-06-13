@@ -23,35 +23,50 @@ class GameConfig:
     movetime_default_ms: int = 5_000
 
     # ── LED hardware ──────────────────────────────────────────────────────────
-    chess_led_pin: int        = 32
+    # WS2812b data on SPI1 MOSI — BOARD 19, BCM line_offset 135
+    chess_led_pin: int        = 135   # BOARD 19 (SPI1 MOSI) → BCM 135
     chess_led_count: int      = 64
     chess_led_brightness: int = 76    # ~30 % of 255 — prevents micro-USB overcurrent
     chess_led_channel: int    = 0
-    panel_led_pin: int        = 33
+    panel_led_pin: int        = 33    # unused until panel hardware present
     panel_led_count: int      = 22
-    panel_led_brightness: int = 0     # disabled until panel hardware is present
+    panel_led_brightness: int = 0
     panel_led_channel: int    = 1
     led_freq_hz: int          = 800_000
     led_dma: int              = 10
     led_invert: bool          = False
 
     # ── Button hardware ───────────────────────────────────────────────────────
-    button_debounce_s: float  = 0.30  # 300 ms — matches original Arduino sketch
-    hint_pin: int             = 16
+    # BCM key numbers as used by Jetson.GPIO in BCM mode.
+    # Confirmed by matching BOARD ChannelInfo.gpio_name → BCM dict keys.
+    #
+    # BOARD  7  PAC.06  → BCM  4
+    # BOARD 11  PR.04   → BCM 17
+    # BOARD 13  PY.00   → BCM 27
+    # BOARD 15  PN.01   → BCM 22
+    # BOARD 16  PY.04   → BCM 23  (hint)
+    # BOARD 29  PQ.05   → BCM  5
+    # BOARD 31  PQ.06   → BCM  6
+    # BOARD 32  PG.06   → BCM 12  (OK / confirm)
+    # BOARD 33  PH.00   → BCM 13
+    # BOARD 35  PI.02   → BCM 19
+    button_debounce_s: float  = 0.30
+    hint_pin: int             = 23    # BOARD 16 → BCM 23
     button_pins: dict         = field(default_factory=lambda: {
-        1: 7,   # A / column 1
-        2: 11,  # B / column 2
-        3: 13,  # C / column 3
-        4: 15,  # D / column 4
-        5: 29,  # E / column 5
-        6: 31,  # F / column 6
-        7: 26,  # G / column 7
-        8: 24,  # H / column 8
-        9: 32,  # OK / confirm
+        1:  4,    # BOARD  7  — A / column 1
+        2: 17,    # BOARD 11  — B / column 2
+        3: 27,    # BOARD 13  — C / column 3
+        4: 22,    # BOARD 15  — D / column 4
+        5:  5,    # BOARD 29  — E / column 5
+        6:  6,    # BOARD 31  — F / column 6
+        7: 13,    # BOARD 33  — G / column 7
+        8: 19,    # BOARD 35  — H / column 8
+        9: 12,    # BOARD 32  — OK / confirm
     })
 
     # ── OLED ──────────────────────────────────────────────────────────────────
-    oled_i2c_port: int = field(default_factory=lambda: int(os.environ.get("OLED_I2C_PORT", "1")))
+    # DFRobot OLED on I2C Bus 7 — BOARD pin 3 (SDA) and pin 5 (SCL)
+    oled_i2c_port: int = field(default_factory=lambda: int(os.environ.get("OLED_I2C_PORT", "7")))
     oled_i2c_addr: int = field(default_factory=lambda: int(os.environ.get("OLED_I2C_ADDR", "0x3C"), 16))
     oled_width: int    = 128
     oled_height: int   = 64

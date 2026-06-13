@@ -1,49 +1,32 @@
-"""
-hardware/buttons.py
-Button input via Jetson Orin Nano GPIO.
-
-Maps the 10 original Arduino buttons (active-LOW, internal pull-up) to
-Jetson 40-pin header BOARD-mode pins.
-
-Pin mapping:
-  Pin 7  (GPIO216) → Button 1  (A / col 1 / row 1)
-  Pin 11 (GPIO50)  → Button 2  (B / col 2 / row 2)
-  Pin 13 (GPIO51)  → Button 3  (C / col 3 / row 3)
-  Pin 15 (GPIO160) → Button 4  (D / col 4 / row 4)
-  Pin 29 (GPIO149) → Button 5  (E / col 5 / row 5)
-  Pin 31 (GPIO200) → Button 6  (F / col 6 / row 6)
-  Pin 26 (GPIO168) → Button 7  (G / col 7 / row 7)
-  Pin 24 (GPIO195) → Button 8  (H / col 8 / row 8)
-  Pin 32 (GPIO114) → Button 9  (OK / confirm) - MOVED FROM 19 FOR SPI
-  Pin 16 (GPIO163) → HINT button (hardware interrupt, falling edge)
-
-Set MOCK_BUTTONS=1 to run without GPIO hardware (keyboard input in terminal).
-"""
+# =============================================================================
+# hardware/buttons.py
+# Author : Richard Pu
+# Created: 2026-06-10  |  Revised: 2026-06-12
+# Purpose: Button input via Jetson Orin Nano GPIO using confirmed BCM
+#          (line_offset) numbers for this board. See config.py for the
+#          full BOARD->BCM mapping table.
+#
+#          rpi_ws281x unconditionally sets GPIO.BCM when the LED strip
+#          initialises — we align with that and use BCM numbers throughout.
+#
+#          No-resistor debounce: Jetson.GPIO ignores pull_up_down, so pins
+#          float. Three consecutive LOW reads 5 ms apart reject noise and
+#          confirm a real press. Permanent fix: 10 kΩ from each pin to 3.3 V.
+#
+#          Set MOCK_BUTTONS=1 to run without hardware (keyboard input).
+# =============================================================================
 
 import os
 import time
 import logging
-from typing import Callable, Optional
+import threading
+from typing import Callable, Dict, Optional
+
+from config import CFG
 
 log = logging.getLogger(__name__)
 
 MOCK = os.environ.get("MOCK_BUTTONS", "0") == "1"
-DEBOUNCE_S = 0.3  # 300 ms — matches buttonDebounceTime in Arduino sketch
-
-# Jetson BOARD-mode pin numbers for buttons 1–9
-BUTTON_PINS = {
-    1: 7,  # A/1
-    2: 11,  # B/2
-    3: 13,  # C/3
-    4: 15,  # D/4
-    5: 29,  # E/5
-    6: 31,  # F/6
-    7: 26,  # G/7
-    8: 24,  # H/8
-    9: 32,  # OK (Moved to 32 to free up SPI MOSI)
-}
-HINT_PIN = 16  # falling-edge interrupt
-BOARD_MODE = 10  # Jetson.GPIO BOARD mode constant
 
 if not MOCK:
     try:
@@ -54,53 +37,29 @@ if not MOCK:
 
 if MOCK:
     import queue as _queue
-    import threading as _threading
 
     class _MockGPIO:
-        """Keyboard-driven stub: type 1-9 or 'h' + Enter."""
-
-        BOARD = 10
-        IN = 1
-        PUD_UP = 22
-        FALLING = 32
+        BCM = 11; BOARD = 10; IN = "IN"; FALLING = "FALLING"
 
         def __init__(self):
-            self._q: _queue.Queue = _queue.Queue()
+            self._q = _queue.Queue()
             self._callbacks: dict = {}
-            self._mode = None
             self._start_reader()
 
-        def setmode(self, m):
-            self._mode = m
-
-        def getmode(self):
-            return self._mode
-
-        def setwarnings(self, w):
-            pass
-
-        def cleanup(self):
-            log.debug("[MOCK] GPIO.cleanup()")
-
-        def setup(self, pin, direction, pull_up_down=None):
-            pass
+        def setmode(self, m): pass
+        def setwarnings(self, w): pass
+        def getmode(self): return self.BCM
+        def cleanup(self): log.debug("[MOCK] GPIO.cleanup()")
+        def setup(self, pin, direction, **kw): pass
 
         def input(self, pin):
-            """Non-blocking snapshot — LOW (0) only if queued key matches this pin."""
             if not self._q.empty():
-                key = self._q.queue[0]  # peek
-                for num, p in BUTTON_PINS.items():
+                key = self._q.queue[0]
+                for num, p in CFG.button_pins.items():
                     if p == pin and str(num) == key:
-                        self._q.get_nowait()  # consume
-                        return 0  # LOW = pressed
-            return 1  # HIGH = not pressed
-
-        def add_event_detect(self, pin, edge, callback=None, bouncetime=200):
-            if callback:
-                self._callbacks[pin] = callback
-
-        def remove_event_detect(self, pin):
-            self._callbacks.pop(pin, None)
+                        self._q.get_nowait()
+                        return 0
+            return 1
 
         def _start_reader(self):
             def _read():
@@ -109,92 +68,161 @@ if MOCK:
                     try:
                         key = input("btn> ").strip().lower()
                         if key == "h":
-                            cb = self._callbacks.get(HINT_PIN)
+                            cb = self._callbacks.get(CFG.hint_pin)
                             if cb:
-                                cb(HINT_PIN)
+                                cb(CFG.hint_pin)
                         else:
                             self._q.put(key)
                     except EOFError:
                         break
-
-            _threading.Thread(target=_read, daemon=True).start()
+            threading.Thread(target=_read, daemon=True).start()
 
     GPIO = _MockGPIO()  # type: ignore
 
 
 class ButtonController:
-    def __init__(self):
-        # --- FIX FOR ADAFRUIT BLINKA COLLISION ---
-        # Blinka globally locks Jetson.GPIO to TEGRA_SOC or BCM mode upon import. 
-        # Since the LEDs use hardware SPI (not GPIO), we can safely clear 
-        # this lock to enforce our physical BOARD numbering for the buttons.
-        current_mode = GPIO.getmode()
-        if current_mode is not None and current_mode != BOARD_MODE:
-            log.info(f"Clearing conflicting Blinka GPIO mode ({current_mode})...")
-            try:
-                GPIO.cleanup()
-            except Exception as e:
-                log.warning(f"GPIO cleanup warning: {e}")
+    """
+    Software-debounced button driver using confirmed BCM line_offset numbers.
 
-        GPIO.setmode(BOARD_MODE)
+    Uses GPIO.BCM throughout (rpi_ws281x always sets this mode first).
+    Pin numbers in CFG.button_pins are BCM line_offset values confirmed
+    by reading Jetson.GPIO's ChannelInfo.line_offset on this exact board.
+
+    Debounce: CONFIRM_SAMPLES consecutive LOW reads before press accepted.
+              RELEASE_SAMPLES consecutive HIGH reads before re-arm.
+    """
+
+    CONFIRM_SAMPLES   = 3
+    RELEASE_SAMPLES   = 5
+    SAMPLE_INTERVAL_S = 0.005  # 5 ms → ~15 ms confirmation latency
+
+    def __init__(self):
         GPIO.setwarnings(False)
-        
-        for pin in BUTTON_PINS.values():
-            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.setup(HINT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        
+
+        # Accept BCM mode whether rpi_ws281x already set it or not
+        try:
+            current = GPIO.getmode()
+        except Exception:
+            current = None
+
+        if current is None:
+            GPIO.setmode(GPIO.BCM)
+        # else: already BCM (11 or Jetson's internal 1000) — nothing to do
+
+        # Setup all pins — no pull_up_down (Jetson ignores it anyway)
+        for btn_num, bcm_pin in CFG.button_pins.items():
+            try:
+                GPIO.setup(bcm_pin, GPIO.IN)
+            except Exception as e:
+                log.error(f"GPIO.setup failed for button {btn_num} BCM pin {bcm_pin}: {e}")
+                raise
+
+        try:
+            GPIO.setup(CFG.hint_pin, GPIO.IN)
+        except Exception as e:
+            log.error(f"GPIO.setup failed for hint BCM pin {CFG.hint_pin}: {e}")
+            raise
+
         self._hint_callback: Optional[Callable] = None
         self._last_hint_time = 0.0
-        log.info("ButtonController ready")
 
-    # ── Public API ────────────────────────────────────────────────────────────
+        all_pins = list(CFG.button_pins.values()) + [CFG.hint_pin]
+        self._low_count:  Dict[int, int]  = {p: 0 for p in all_pins}
+        self._high_count: Dict[int, int]  = {p: self.RELEASE_SAMPLES for p in all_pins}
+        self._armed:      Dict[int, bool] = {p: True for p in all_pins}
 
-    def register_hint_callback(self, callback: Callable):
-        """
-        Attach an interrupt to HINT_PIN (falling edge).
-        Mirrors attachInterrupt(digitalPinToInterrupt(3), hint, FALLING).
-        """
-        self._hint_callback = callback
-        GPIO.add_event_detect(
-            HINT_PIN,
-            GPIO.FALLING,
-            callback=self._raw_hint_handler,
-            bouncetime=200,
+        self._hint_poll_running = False
+        self._hint_poll_thread: Optional[threading.Thread] = None
+
+        log.info(
+            f"ButtonController ready — BCM mode, "
+            f"debounce {self.CONFIRM_SAMPLES}×{self.SAMPLE_INTERVAL_S*1000:.0f}ms. "
+            "Add 10kΩ pull-ups to each pin for hardware-clean inputs."
         )
 
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def register_hint_callback(self, callback: Callable):
+        self._hint_callback = callback
+        self._hint_poll_running = True
+        self._hint_poll_thread = threading.Thread(
+            target=self._hint_poll_loop, daemon=True, name="hint-poll"
+        )
+        self._hint_poll_thread.start()
+
     def detect_button(self) -> int:
-        """
-        Blocking poll — returns 1-9 when a button is pressed.
-        Exact mirror of detectButton() in Arduino sketch.
-        10 ms poll interval to avoid busy-spinning.
-        """
+        """Block until a button press is confirmed. Returns 1–9."""
+        for pin in CFG.button_pins.values():
+            self._low_count[pin]  = 0
+            self._high_count[pin] = self.RELEASE_SAMPLES
+            self._armed[pin]      = True
+
         while True:
-            for num, pin in BUTTON_PINS.items():
-                if GPIO.input(pin) == 0:  # LOW = pressed
-                    log.debug(f"Button {num} (pin {pin})")
-                    time.sleep(DEBOUNCE_S)
+            for num, pin in CFG.button_pins.items():
+                if self._sample_pin(pin) == "pressed":
+                    log.debug(f"Button {num} (BCM {pin}) confirmed")
                     return num
-            time.sleep(0.01)
+            time.sleep(self.SAMPLE_INTERVAL_S)
 
     def is_ok_held(self) -> bool:
-        """True if OK button (btn 9, pin 32) is currently LOW."""
-        return GPIO.input(BUTTON_PINS[9]) == 0
+        return self._is_solidly_low(CFG.button_pins[9])
 
     def is_button8_held(self) -> bool:
-        """True if button 8 / H (pin 24) is currently LOW."""
-        return GPIO.input(BUTTON_PINS[8]) == 0
+        return self._is_solidly_low(CFG.button_pins[8])
 
     def cleanup(self):
-        GPIO.remove_event_detect(HINT_PIN)
+        self._hint_poll_running = False
+        if self._hint_poll_thread:
+            self._hint_poll_thread.join(timeout=1.0)
         GPIO.cleanup()
 
-    # ── Internal ──────────────────────────────────────────────────────────────
+    # ── Internal ──────────────────────────────────────────────────────────
 
-    def _raw_hint_handler(self, channel):
-        """200 ms software debounce wrapper (mirrors Arduino ISR debounce)."""
-        now = time.time()
-        if now - self._last_hint_time < 0.2:
-            return
-        self._last_hint_time = now
-        if self._hint_callback:
-            self._hint_callback(channel)
+    def _sample_pin(self, pin: int) -> str:
+        raw = GPIO.input(pin)
+        if raw == 0:
+            self._high_count[pin] = 0
+            if self._armed[pin]:
+                self._low_count[pin] += 1
+                if self._low_count[pin] >= self.CONFIRM_SAMPLES:
+                    self._low_count[pin] = 0
+                    self._armed[pin]     = False
+                    return "pressed"
+        else:
+            self._low_count[pin] = 0
+            self._high_count[pin] += 1
+            if not self._armed[pin] and self._high_count[pin] >= self.RELEASE_SAMPLES:
+                self._armed[pin] = True
+        return "idle"
+
+    def _is_solidly_low(self, pin: int, samples: int = 3) -> bool:
+        for _ in range(samples):
+            if GPIO.input(pin) != 0:
+                return False
+            time.sleep(self.SAMPLE_INTERVAL_S)
+        return True
+
+    def _hint_poll_loop(self):
+        hint_low = 0; hint_high = self.RELEASE_SAMPLES; hint_armed = True
+        while self._hint_poll_running:
+            raw = GPIO.input(CFG.hint_pin)
+            if raw == 0:
+                hint_high = 0
+                if hint_armed:
+                    hint_low += 1
+                    if hint_low >= self.CONFIRM_SAMPLES:
+                        hint_low = 0; hint_armed = False
+                        now = time.time()
+                        if now - self._last_hint_time >= 0.2:
+                            self._last_hint_time = now
+                            if self._hint_callback:
+                                threading.Thread(
+                                    target=self._hint_callback,
+                                    args=(CFG.hint_pin,),
+                                    daemon=True,
+                                ).start()
+            else:
+                hint_low = 0; hint_high += 1
+                if not hint_armed and hint_high >= self.RELEASE_SAMPLES:
+                    hint_armed = True
+            time.sleep(self.SAMPLE_INTERVAL_S)

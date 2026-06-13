@@ -26,8 +26,12 @@ BLACK = (0, 0, 0)
 
 
 def main():
-    leds = LEDController()
+    # ButtonController MUST be initialised before LEDController.
+    # rpi_ws281x calls GPIO.setmode(BCM) internally when the strip starts,
+    # which would conflict with our BOARD-mode button pins. Initialising
+    # buttons first lets us claim BOARD mode before the LED library runs.
     buttons = ButtonController()
+    leds = LEDController()
 
     print("Testing LEDs...")
 
