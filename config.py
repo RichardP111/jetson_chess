@@ -47,7 +47,7 @@ class GameConfig:
         6: 31,  # F / column 6
         7: 26,  # G / column 7
         8: 24,  # H / column 8
-        9: 19,  # OK / confirm
+        9: 32,  # OK / confirm
     })
 
     # ── OLED ──────────────────────────────────────────────────────────────────

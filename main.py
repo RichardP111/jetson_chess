@@ -11,6 +11,7 @@
 
 import time
 import logging
+import logging.handlers
 import sys
 import signal
 import threading
@@ -18,6 +19,8 @@ import threading
 import chess as _chess
 
 from dotenv import load_dotenv
+
+load_dotenv()
 
 from config import CFG
 from hardware.leds import LEDController
@@ -56,8 +59,6 @@ PROMOTION_NAME = {"q": "queen", "r": "rook", "b": "bishop", "n": "knight"}
 class ChessGame:
     def __init__(self):
         log.info("Initialising Jetson Smart Chess Board v4...")
-
-        load_dotenv()
 
         self.leds = LEDController()
         self.buttons = ButtonController()

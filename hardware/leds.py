@@ -3,8 +3,8 @@
 # Author : Richard Pu
 # Created: 2026-06-10  |  Revised: 2026-06-12
 # Purpose: WS2812b LED control for the Jetson Orin Nano smart chessboard.
-#          Manages two LED strips — 64-pixel chessboard and 22-pixel control
-#          panel. The chessboard strip brightness is capped at ~30 % (76/255)
+#          Uses Adafruit Blinka via SPI to bypass Jetson OS timing limitations.
+#          The chessboard strip brightness is capped at ~30% (0.3)
 #          to prevent overcurrent damage to the micro-USB connector.
 #          Control panel strip is disabled pending hardware availability.
 # Env   : Set MOCK_LEDS=1 to run without physical hardware (logs calls only).
@@ -12,7 +12,7 @@
 
 import os
 import logging
-from typing import Tuple
+from typing import Any, Tuple, cast
 
 from config import CFG
 
@@ -22,60 +22,53 @@ MOCK = os.environ.get("MOCK_LEDS", "0") == "1"
 
 if not MOCK:
     try:
-        from rpi_ws281x import PixelStrip, Color
+        import board
+        import neopixel_spi as neopixel
     except ImportError:
         log.warning(
-            "rpi_ws281x not found — falling back to mock mode. "
-            "Install with: pip install rpi_ws281x"
+            "neopixel_spi not found — falling back to mock mode. "
+            "Install with: pip install adafruit-circuitpython-neopixel-spi Adafruit-Blinka"
         )
         MOCK = True
 
 if MOCK:
+    class MockNeoPixel:
+        def __init__(self, pin, n, brightness=1.0, auto_write=True, pixel_order=None):
+            self.n = n
+            self.brightness = brightness
+            self.pixels = [(0, 0, 0)] * n
+            log.debug(f"[MOCK] NeoPixel(n={n}, pin={pin})")
 
-    class Color:  # noqa: F811
-        def __new__(cls, r, g, b):  # type: ignore[override]
-            return (r << 16) | (g << 8) | b
+        def __setitem__(self, index, val):
+            if 0 <= index < self.n:
+                self.pixels[index] = val
 
-    class PixelStrip:  # noqa: F811
-        def __init__(self, count, pin, freq=800_000, dma=10, invert=False,
-                     brightness=255, channel=0):
-            self._count      = count
-            self._pixels     = [0] * count
-            self._brightness = brightness
-            log.debug(f"[MOCK] PixelStrip(count={count}, pin={pin}, ch={channel})")
-
-        def begin(self):
-            log.debug("[MOCK] strip.begin()")
+        def __getitem__(self, index):
+            return self.pixels[index]
 
         def show(self):
-            log.debug(f"[MOCK] strip.show() — pixels={self._pixels[:8]}...")
+            log.debug(f"[MOCK] strip.show() — pixels={self.pixels[:8]}...")
+            
+        def fill(self, color):
+            self.pixels = [color] * self.n
 
-        def setPixelColor(self, n, color):
-            if 0 <= n < self._count:
-                self._pixels[n] = color
-
-        def getPixelColor(self, n):
-            return self._pixels[n] if 0 <= n < self._count else 0
-
-        def numPixels(self):
-            return self._count
-
-        def setBrightness(self, brightness):
-            self._brightness = brightness
-
-        def fill(self, color, first=0, count=0):
-            end = (first + count) if count else self._count
-            for i in range(first, min(end, self._count)):
-                self._pixels[i] = color
-
-
-def _rgb(r: int, g: int, b: int) -> int:
-    return Color(r, g, b)
+    # Stub out the board and neopixel modules so the main class doesn't crash
+    class _MockBoard:
+        def SPI(self):
+            return "MOCK_SPI"
+            
+    class _MockNeopixelMod:
+        NeoPixel = MockNeoPixel
+        NeoPixel_SPI = MockNeoPixel
+        GRB = "GRB"
+        
+    board = _MockBoard()
+    neopixel = _MockNeopixelMod()
 
 
 class LEDController:
     """
-    Unified controller for both WS2812b strips.
+    Unified controller for both WS2812b strips using Jetson SPI.
 
     Chessboard coordinates use (col, row): col 0-7 maps to files a-h,
     row 0-7 maps to ranks 1-8. Strip layout is zigzag:
@@ -84,28 +77,22 @@ class LEDController:
     """
 
     def __init__(self):
-        self.chess = PixelStrip(
+        # Convert integer brightness (0-255) to a float (0.0-1.0) required by neopixel
+        b_float = CFG.chess_led_brightness / 255.0
+        
+        self.chess = neopixel.NeoPixel_SPI(
+            cast(Any, board.SPI()),
             CFG.chess_led_count,
-            CFG.chess_led_pin,
-            CFG.led_freq_hz,
-            CFG.led_dma,
-            CFG.led_invert,
-            CFG.chess_led_brightness,
-            CFG.chess_led_channel,
+            brightness=b_float,
+            auto_write=False,
+            pixel_order=neopixel.GRB
         )
+        
         # Control panel strip is disabled — hardware not present.
-        # Re-enable by setting CFG.panel_led_brightness > 0 and uncommenting below.
-        # self.panel = PixelStrip(
-        #     CFG.panel_led_count, CFG.panel_led_pin, CFG.led_freq_hz, CFG.led_dma,
-        #     CFG.led_invert, CFG.panel_led_brightness, CFG.panel_led_channel,
-        # )
         self.panel = None
 
-        self.chess.begin()
-        # self.panel.begin()
-
         self.all_off()
-        log.info("LEDController ready")
+        log.info("LEDController ready (Jetson SPI Mode)")
 
     # ── Chessboard helpers ─────────────────────────────────────────────────
 
@@ -117,22 +104,19 @@ class LEDController:
 
     def chess_set_pixel(self, col: int, row: int, color: Tuple[int, int, int]):
         idx = self._square_to_index(col, row)
-        self.chess.setPixelColor(idx, _rgb(*color))
+        self.chess[idx] = color
 
     def chess_fill(self, color: Tuple[int, int, int], start: int = 0, count: int = 0):
-        c   = _rgb(*color)
         end = (start + count) if count else CFG.chess_led_count
         for i in range(start, min(end, CFG.chess_led_count)):
-            self.chess.setPixelColor(i, c)
+            self.chess[i] = color
 
-    def chess_fill_rect(self, x: int, y: int, w: int, h: int,
-                        color: Tuple[int, int, int]):
+    def chess_fill_rect(self, x: int, y: int, w: int, h: int, color: Tuple[int, int, int]):
         for row in range(y, y + h):
             for col in range(x, x + w):
                 self.chess_set_pixel(col, row, color)
 
-    def chess_draw_rect(self, x: int, y: int, w: int, h: int,
-                        color: Tuple[int, int, int]):
+    def chess_draw_rect(self, x: int, y: int, w: int, h: int, color: Tuple[int, int, int]):
         for col in range(x, x + w):
             self.chess_set_pixel(col, y, color)
             self.chess_set_pixel(col, y + h - 1, color)
@@ -140,8 +124,7 @@ class LEDController:
             self.chess_set_pixel(x, row, color)
             self.chess_set_pixel(x + w - 1, row, color)
 
-    def chess_draw_line(self, x0: int, y0: int, x1: int, y1: int,
-                        color: Tuple[int, int, int]):
+    def chess_draw_line(self, x0: int, y0: int, x1: int, y1: int, color: Tuple[int, int, int]):
         dx  = abs(x1 - x0)
         dy  = abs(y1 - y0)
         sx  = 1 if x0 < x1 else -1
@@ -174,16 +157,14 @@ class LEDController:
 
     def control_panel_set_pixel(self, idx: int, color: Tuple[int, int, int]):
         if self.panel is not None:
-            self.panel.setPixelColor(idx, _rgb(*color))
+            self.panel[idx] = color
 
-    def control_panel_fill(self, color: Tuple[int, int, int],
-                           start: int = 0, count: int = 0):
+    def control_panel_fill(self, color: Tuple[int, int, int], start: int = 0, count: int = 0):
         if self.panel is None:
             return
-        c   = _rgb(*color)
         end = (start + count) if count else CFG.panel_led_count
         for i in range(start, min(end, CFG.panel_led_count)):
-            self.panel.setPixelColor(i, c)
+            self.panel[i] = color
 
     def panel_show(self):
         if self.panel is not None:
