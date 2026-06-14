@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import time
 import logging
+import logging.handlers
 import sys
 import signal
 import threading
@@ -57,7 +58,6 @@ logging.basicConfig(
         ),
     ],
 )
-import logging.handlers  # noqa: E402 — import after basicConfig so handler is available
 
 log = logging.getLogger("main")
 

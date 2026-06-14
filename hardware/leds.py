@@ -20,67 +20,133 @@ log = logging.getLogger(__name__)
 
 MOCK = os.environ.get("MOCK_LEDS", "0") == "1"
 
-# Module-level Any-typed placeholders so the type checker is happy regardless
-# of whether we import from rpi_ws281x or use the mock classes below.
-PixelStrip: Any
-Color: Any
+# ── Hardware strip implementation ─────────────────────────────────────────────
+# Uses adafruit-circuitpython-neopixel-spi for SPI-based WS2812b on Jetson.
+# The Jetson Orin Nano does not support rpi_ws281x DMA/PWM modes.
+# LED data pin: BOARD 19 (SPI1 MOSI).
 
-if not MOCK:
+class _SpiStrip:
+    """
+    WS2812b driver using raw spidev — bypasses busio/blinka conflicts.
+    Talks directly to /dev/spidev1.0 (SPI1, BOARD pin 19 = MOSI).
+
+    WS2812b protocol encoded in SPI:
+      Each bit is 3 SPI bits: 1=110, 0=100 at ~2.4 MHz → ~800 kHz LED signal.
+    """
+    # SPI bus/device — spidev0.0 confirmed working on BOARD pin 19
+    SPI_BUS    = 0
+    SPI_DEVICE = 0
+    SPI_HZ     = 2_400_000  # 3 SPI bits per WS2812b bit → 800 kHz
+
+    def __init__(self, count: int, brightness: int = 76):
+        import spidev  # type: ignore[import-untyped]
+        self._count      = count
+        self._pixels     = [0] * count
+        self._brightness = brightness / 255.0
+        self._spi        = spidev.SpiDev()
+        self._spi.open(self.SPI_BUS, self.SPI_DEVICE)
+        self._spi.max_speed_hz = self.SPI_HZ
+        self._spi.mode         = 0
+        log.info(f"SPI strip on /dev/spidev{self.SPI_BUS}.{self.SPI_DEVICE} "
+                 f"@ {self.SPI_HZ//1000} kHz, {count} pixels")
+
+    def begin(self):
+        pass
+
+    def _encode_byte(self, byte: int) -> list:
+        """Encode one byte into 3 SPI bytes (24 bits = 8 WS2812b bits)."""
+        out = []
+        for i in range(7, -1, -1):
+            if (byte >> i) & 1:
+                out.append(0b11000000)  # 1-bit: HIGH HIGH LOW
+            else:
+                out.append(0b10000000)  # 0-bit: HIGH LOW  LOW
+        return out
+
+    def _build_frame(self) -> bytes:
+        """Build full SPI frame for all pixels."""
+        buf = []
+        brt = self._brightness
+        for packed in self._pixels:
+            r = int(((packed >> 16) & 0xFF) * brt)
+            g = int(((packed >> 8)  & 0xFF) * brt)
+            b = int(( packed        & 0xFF) * brt)
+            # WS2812b order is GRB
+            buf += self._encode_byte(g)
+            buf += self._encode_byte(r)
+            buf += self._encode_byte(b)
+        # Reset pulse: ≥50 µs LOW = at least 15 zero bytes at 2.4 MHz
+        buf += [0x00] * 20
+        return bytes(buf)
+
+    def show(self):
+        frame = self._build_frame()
+        # spidev writebytes2 handles large buffers
+        self._spi.writebytes2(frame)
+
+    def getPixelColor(self, n: int) -> int:
+        return self._pixels[n] if 0 <= n < self._count else 0
+
+    def setPixelColor(self, n: int, color: int) -> None:
+        if 0 <= n < self._count:
+            self._pixels[n] = color
+
+    def numPixels(self) -> int:
+        return self._count
+
+    def setBrightness(self, brightness: int) -> None:
+        self._brightness = max(0.004, brightness / 255.0)
+
+    def fill(self, color: int, first: int = 0, count: int = 0) -> None:
+        end = (first + count) if count else self._count
+        for i in range(first, min(end, self._count)):
+            self._pixels[i] = color
+
+
+class _MockStrip:
+    """Software-only strip for desktop testing (MOCK_LEDS=1)."""
+    def __init__(self, count: int, brightness: int = 76):
+        self._count      = count
+        self._pixels     = [0] * count
+        self._brightness = brightness
+        log.debug(f"[MOCK] Strip(count={count})")
+
+    def begin(self): pass
+
+    def show(self):
+        log.debug(f"[MOCK] show() pixels={self._pixels[:8]}...")
+
+    def getPixelColor(self, n: int) -> int:
+        return self._pixels[n] if 0 <= n < self._count else 0
+
+    def setPixelColor(self, n: int, color: int) -> None:
+        if 0 <= n < self._count:
+            self._pixels[n] = color
+
+    def numPixels(self) -> int:
+        return self._count
+
+    def setBrightness(self, brightness: int) -> None:
+        self._brightness = brightness
+
+    def fill(self, color: int, first: int = 0, count: int = 0) -> None:
+        end = (first + count) if count else self._count
+        for i in range(first, min(end, self._count)):
+            self._pixels[i] = color
+
+
+def _make_strip(count: int, brightness: int) -> Any:
+    if MOCK:
+        return _MockStrip(count, brightness)
     try:
-        from rpi_ws281x import PixelStrip, Color  # type: ignore[assignment,import-untyped]
-    except ImportError:
-        log.warning(
-            "rpi_ws281x not found — falling back to mock mode. "
-            "Install with: pip install rpi_ws281x"
-        )
-        MOCK = True
-
-if MOCK:
-
-    class _Color:
-        def __new__(cls, r: int, g: int, b: int) -> int:  # type: ignore[misc]
-            return (r << 16) | (g << 8) | b
-
-    Color = _Color  # type: ignore[assignment,misc]
-
-    class _PixelStrip:  # noqa: F811
-        def __init__(self, count, pin, freq=800_000, dma=10, invert=False,
-                     brightness=255, channel=0):
-            self._count      = count
-            self._pixels     = [0] * count
-            self._brightness = brightness
-            log.debug(f"[MOCK] PixelStrip(count={count}, pin={pin}, ch={channel})")
-
-        def begin(self):
-            log.debug("[MOCK] strip.begin()")
-
-        def show(self):
-            log.debug(f"[MOCK] strip.show() — pixels={self._pixels[:8]}...")
-
-        def getPixelColor(self, n: int) -> int:
-            return self._pixels[n] if 0 <= n < self._count else 0
-
-        def setPixelColor(self, n: int, color: int) -> None:
-            if 0 <= n < self._count:
-                self._pixels[n] = color
-
-        def numPixels(self):
-            return self._count
-
-        def setBrightness(self, brightness):
-            self._brightness = brightness
-
-        def fill(self, color, first=0, count=0):
-            end = (first + count) if count else self._count
-            for i in range(first, min(end, self._count)):
-                self._pixels[i] = color
-
-
-    PixelStrip = _PixelStrip  # type: ignore[assignment]
+        return _SpiStrip(count, brightness)
+    except Exception as e:
+        log.warning(f"SPI strip init failed ({e}) — using mock")
+        return _MockStrip(count, brightness)
 
 
 def _rgb(r: int, g: int, b: int) -> int:
-    return Color(r, g, b)
+    return (r << 16) | (g << 8) | b
 
 
 class LEDController:
@@ -94,25 +160,12 @@ class LEDController:
     """
 
     def __init__(self):
-        self.chess = PixelStrip(
-            CFG.chess_led_count,
-            CFG.chess_led_pin,
-            CFG.led_freq_hz,
-            CFG.led_dma,
-            CFG.led_invert,
-            CFG.chess_led_brightness,
-            CFG.chess_led_channel,
-        )
-        # Control panel strip is disabled — hardware not present.
-        # Re-enable by setting CFG.panel_led_brightness > 0 and uncommenting below.
-        # self.panel = PixelStrip(
-        #     CFG.panel_led_count, CFG.panel_led_pin, CFG.led_freq_hz, CFG.led_dma,
-        #     CFG.led_invert, CFG.panel_led_brightness, CFG.panel_led_channel,
-        # )
-        self.panel = None
-
+        # SPI-based WS2812b — adafruit_neopixel_spi handles BOARD pin 19 (SPI MOSI)
+        self.chess = _make_strip(CFG.chess_led_count, CFG.chess_led_brightness)
         self.chess.begin()
-        # self.panel.begin()
+
+        # Control panel strip disabled — hardware not present.
+        self.panel: Any = None
 
         self.all_off()
         log.info("LEDController ready")

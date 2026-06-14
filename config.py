@@ -24,17 +24,17 @@ class GameConfig:
 
     # ── LED hardware ──────────────────────────────────────────────────────────
     # WS2812b data on SPI1 MOSI — BOARD 19, BCM line_offset 135
-    chess_led_pin: int        = 135   # BOARD 19 (SPI1 MOSI) → BCM 135
+    chess_led_pin: int        = 19    # BOARD 19 (SPI1 MOSI) — used for reference only
     chess_led_count: int      = 64
-    chess_led_brightness: int = 76    # ~30 % of 255 — prevents micro-USB overcurrent
-    chess_led_channel: int    = 0
+    chess_led_brightness: int = 76    # 0-255 — ~30% prevents micro-USB overcurrent
+    chess_led_channel: int    = 0     # unused by adafruit_neopixel_spi
     panel_led_pin: int        = 33    # unused until panel hardware present
     panel_led_count: int      = 22
     panel_led_brightness: int = 0
     panel_led_channel: int    = 1
-    led_freq_hz: int          = 800_000
-    led_dma: int              = 10
-    led_invert: bool          = False
+    led_freq_hz: int          = 800_000  # unused by adafruit_neopixel_spi
+    led_dma: int              = 10       # unused by adafruit_neopixel_spi
+    led_invert: bool          = False    # unused by adafruit_neopixel_spi
 
     # ── Button hardware ───────────────────────────────────────────────────────
     # Physical BOARD pin numbers. All pins confirmed to have internal pull-ups
