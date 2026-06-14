@@ -37,31 +37,62 @@ class GameConfig:
     led_invert: bool          = False
 
     # ── Button hardware ───────────────────────────────────────────────────────
-    # BCM key numbers as used by Jetson.GPIO in BCM mode.
-    # Confirmed by matching BOARD ChannelInfo.gpio_name → BCM dict keys.
+    # Physical BOARD pin numbers. All pins confirmed to have internal pull-ups
+    # (rest HIGH, press to GND = LOW). Pin 29 lacks pull-up so button 5
+    # is remapped to pin 36 which does have one.
     #
-    # BOARD  7  PAC.06  → BCM  4
-    # BOARD 11  PR.04   → BCM 17
-    # BOARD 13  PY.00   → BCM 27
-    # BOARD 15  PN.01   → BCM 22
-    # BOARD 16  PY.04   → BCM 23  (hint)
-    # BOARD 29  PQ.05   → BCM  5
-    # BOARD 31  PQ.06   → BCM  6
-    # BOARD 32  PG.06   → BCM 12  (OK / confirm)
-    # BOARD 33  PH.00   → BCM 13
-    # BOARD 35  PI.02   → BCM 19
+    # BOARD  7  → Button 1 (A/col 1)   — pull-up confirmed
+    # BOARD 11  → Button 2 (B/col 2)   — pull-up confirmed
+    # BOARD 13  → Button 3 (C/col 3)   — pull-up confirmed
+    # BOARD 15  → Button 4 (D/col 4)   — pull-up confirmed
+    # BOARD 36  → Button 5 (E/col 5)   — pull-up confirmed (was 29, no pull-up)
+    # BOARD 31  → Button 6 (F/col 6)   — pull-up confirmed
+    # BOARD 32  → OK / confirm (btn 9) — pull-up confirmed
+    # BOARD 33  → Button 7 (G/col 7)   — pull-up confirmed
+    # BOARD 35  → Button 8 (H/col 8)   — pull-up confirmed
+    # BOARD 16  → Hint button           — pull-up confirmed
+    # ── Button hardware ───────────────────────────────────────────────────────
+    # Pins remapped to avoid the 3 pins with no internal pull-up (7, 16, 29).
+    # All pins below confirmed SOLID HIGH with nothing connected.
+    # Buttons wire: GPIO pin -> button -> GND. Pressed = LOW, released = HIGH.
+    #
+    # BOARD 24  → Button 1 (A/col 1)  remapped from 7  (no pull-up)
+    # BOARD 11  → Button 2 (B/col 2)
+    # BOARD 13  → Button 3 (C/col 3)
+    # BOARD 15  → Button 4 (D/col 4)
+    # BOARD 36  → Button 5 (E/col 5)  remapped from 29 (no pull-up)
+    # BOARD 31  → Button 6 (F/col 6)
+    # BOARD 33  → Button 7 (G/col 7)
+    # BOARD 35  → Button 8 (H/col 8)
+    # BOARD 32  → OK / confirm (btn 9)
+    # BOARD 26  → Hint button          remapped from 16 (no pull-up)
+    # ── Button matrix ─────────────────────────────────────────────────────────
+    # 4-column × 3-row matrix with 470Ω pull-up resistors on columns.
+    # Columns: BOARD 7, 11, 13, 15  (rest HIGH via resistors to 3.3V)
+    # Rows:    BOARD 36, 37, 32     (driven LOW to scan)
+    #
+    # Layout:
+    #          Col_1(7)  Col_2(11)  Col_3(13)  Col_4(15)
+    #  Row_1(36)  btn1     btn2       btn3       btn4
+    #  Row_2(37)  btn5     btn6       btn7       btn8
+    #  Row_3(32)  btn9(OK)  hint
+    #  Row_4(18)  btn2      btn1
+    #  Row_5(22)  btn6      btn5
+    #
+    # Pin definitions live in hardware/buttons.py (COL_PINS, ROW_PINS).
+    # These config values are kept for reference / tests only.
     button_debounce_s: float  = 0.30
-    hint_pin: int             = 23    # BOARD 16 → BCM 23
+    hint_pin: int             = 11    # Col_2 pin (hint cell is Row_3 Col_2)
     button_pins: dict         = field(default_factory=lambda: {
-        1:  4,    # BOARD  7  — A / column 1
-        2: 17,    # BOARD 11  — B / column 2
-        3: 27,    # BOARD 13  — C / column 3
-        4: 22,    # BOARD 15  — D / column 4
-        5:  5,    # BOARD 29  — E / column 5
-        6:  6,    # BOARD 31  — F / column 6
-        7: 13,    # BOARD 33  — G / column 7
-        8: 19,    # BOARD 35  — H / column 8
-        9: 12,    # BOARD 32  — OK / confirm
+        1: 11,    # Row_4 Col_2
+        2: 7,     # Row_4 Col_1
+        3: 11,    # Row_1 Col_2
+        4: 7,     # Row_1 Col_1
+        5: 11,    # Row_5 Col_2
+        6: 7,     # Row_5 Col_1
+        7: 11,    # Row_2 Col_2
+        8: 7,     # Row_2 Col_1
+        9: 7,     # Row_3 Col_1  (OK / confirm)
     })
 
     # ── OLED ──────────────────────────────────────────────────────────────────
@@ -74,6 +105,7 @@ class GameConfig:
     # ── Web server ────────────────────────────────────────────────────────────
     web_host: str = "0.0.0.0"
     web_port: int = 5000
+    dev_pin:  str = "1337"    # PIN for the dev menu on the dashboard
 
     # ── Gameplay ──────────────────────────────────────────────────────────────
     hint_dismiss_s: float    = 4.0   # seconds hint stays lit before auto-dismiss

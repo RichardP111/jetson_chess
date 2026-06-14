@@ -1,9 +1,12 @@
+from __future__ import annotations
 # =============================================================================
 # oled/oled_display.py
 # Author : Richard Pu
 # Created: 2026-06-10  |  Revised: 2026-06-12
 # Purpose: SSD1306 128×64 I2C OLED driver for the Grove connector on the
 #          Jetson. Renders all game screens with a clear, navigable layout.
+#          New screens: promotion select, undo confirm, local two-player,
+#          USB save confirmation, post-game analysis summary.
 #          Set MOCK_OLED=1 for headless use.
 # =============================================================================
 
@@ -56,31 +59,30 @@ if MOCK:
         def line(self, *a, **k):      pass
         def ellipse(self, *a, **k):   pass
 
-    def _make_mock_device():
+    def _make_device_mock():
         log.debug("[MOCK OLED] device created")
         return _FakeDevice()
 
-    canvas = _FakeCanvas  # noqa: F811
-    Image  = None
-
-    def _load_mock_font(size=10):
+    def _load_font_mock(size: int = 10):
         return None
 
+    canvas = _FakeCanvas  # noqa: F811
+    Image  = None
+    _make_device_fn = _make_device_mock
+    _load_font_fn   = _load_font_mock
+
 else:
-    def _make_hw_device():
+    def _make_device_fn():
         serial = i2c(port=CFG.oled_i2c_port, address=CFG.oled_i2c_addr)
         return ssd1306(serial, width=CFG.oled_width, height=CFG.oled_height)
 
-    def _load_hw_font(size=10):
+    def _load_font_fn(size: int = 10):
         try:
             return ImageFont.truetype(
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size
             )
         except Exception:
             return ImageFont.load_default()
-
-_make_device = _make_mock_device if MOCK else _make_hw_device
-_load_font = _load_mock_font if MOCK else _load_hw_font
 
 
 W, H = CFG.oled_width, CFG.oled_height
@@ -91,10 +93,10 @@ _FONT_SMALL = _FONT_MED = _FONT_LARGE = _FONT_TINY = None
 def _fonts():
     global _FONT_SMALL, _FONT_MED, _FONT_LARGE, _FONT_TINY
     if _FONT_SMALL is None:
-        _FONT_SMALL = _load_font(10)
-        _FONT_MED   = _load_font(14)
-        _FONT_LARGE = _load_font(20)
-        _FONT_TINY  = _load_font(8)
+        _FONT_SMALL = _load_font_fn(10)
+        _FONT_MED   = _load_font_fn(14)
+        _FONT_LARGE = _load_font_fn(20)
+        _FONT_TINY  = _load_font_fn(8)
     return _FONT_SMALL, _FONT_MED, _FONT_LARGE, _FONT_TINY
 
 
@@ -119,7 +121,7 @@ class OLEDDisplay:
     """
 
     def __init__(self):
-        self._device = _make_device()
+        self._device = _make_device_fn()
         self._lock   = threading.Lock()
         self._current_screen = "idle"
 
@@ -151,12 +153,12 @@ class OLEDDisplay:
     def show_setup_difficulty(self, current: int = 0):
         self._current_screen = "setup"
         self._stop_clock()
-        self._draw_setup("Difficulty", "Btn 1-8 to set", current, 8)
+        self._draw_setup("Difficulty", "1-8 or slider on web", current, 20)
 
     def show_setup_timeout(self, current_ms: int = 0):
         self._current_screen = "setup"
         secs = current_ms // 1000
-        self._draw_setup("Move Time", "Btn 1-8 to set", secs, 12)
+        self._draw_setup("Move Time", "1-8 or pick on web", secs, 20)
 
     def show_setup_colour(self):
         self._current_screen = "setup"
@@ -166,7 +168,7 @@ class OLEDDisplay:
         self,
         whose_turn: str,
         last_move: str = "",
-        move_history: list | None = None,
+        move_history: list = None,  # type: ignore[assignment]
         status: str = "",
         eval_score: int = 0,
     ):
@@ -196,6 +198,9 @@ class OLEDDisplay:
         self._status_msg = msg
         if self._current_screen == "game":
             self._draw_game()
+        else:
+            # Show status on any screen via a brief overlay
+            self._draw_status_overlay(msg)
 
     def show_checkmate(self, winner: str):
         self._current_screen = "checkmate"
@@ -247,6 +252,27 @@ class OLEDDisplay:
                 draw.text((4, 33), "Pass the board each", font=ft, fill="white")
                 draw.text((4, 43), "turn. Good luck!", font=ft, fill="white")
 
+    def show_draw(self, reason: str):
+        """Show draw result screen."""
+        self._current_screen = "draw"
+        self._stop_clock()
+        self._draw_draw(reason)
+
+    def show_pass_board(self, next_turn: str, move_count: int):
+        """Show pass-the-board screen for local 2P mode."""
+        self._current_screen = "pass"
+        self._draw_pass_board(next_turn, move_count)
+
+    def show_network_info(self, ip: str):
+        """Show IP address for web dashboard access."""
+        self._current_screen = "network"
+        self._draw_network_info(ip)
+
+    def show_coordinate_prompt(self, step: str, partial: str = ""):
+        """Show current coordinate input state during move entry."""
+        if self._current_screen == "game":
+            self._draw_coordinate_prompt(step, partial)
+
     def clear(self):
         with self._lock:
             with canvas(self._device) as draw:
@@ -266,11 +292,12 @@ class OLEDDisplay:
                 draw.rectangle((0, 0, W - 1, H - 1), fill="black")
                 draw.rectangle((0, 0, W - 1, 14), fill="white")
                 draw.text((4, 1), "Select Game Mode", font=fs, fill="black")
-                draw.text((4, 17), "1: vs AI (Stockfish)", font=fs, fill="white")
-                draw.text((4, 28), "2: Online (Lichess)",  font=fs, fill="white")
-                draw.text((4, 39), "3: Local 2 Player",    font=fs, fill="white")
-                draw.line((0, 51, W - 1, 51), fill="white")
-                draw.text((4, 54), "NVIDIA Jetson Orin Nano", font=ft, fill="white")
+                draw.text((4, 17), "1: vs AI (Stockfish)", font=ft, fill="white")
+                draw.text((4, 27), "2: Online (Lichess)",  font=ft, fill="white")
+                draw.text((4, 37), "3: Local 2 Player",    font=ft, fill="white")
+                draw.text((4, 47), "or select on dashboard", font=ft, fill="white")
+                draw.line((0, 57, W - 1, 57), fill="white")
+                draw.text((4, 59), "jetson:5000", font=ft, fill="white")
 
     def _draw_setup(self, label: str, prompt: str, current: int, max_val: int):
         fs, fm, fl, ft = _fonts()
@@ -302,6 +329,15 @@ class OLEDDisplay:
                 draw.rectangle((66, 20, 122, 50), outline="white")
                 draw.text((71, 27), "BLACK", font=fs, fill="white")
                 draw.text((71, 39), "Btn 2",  font=ft, fill="white")
+
+    @staticmethod
+    def _uci_to_san_approx(uci: str) -> str:
+        """Very lightweight UCI → readable format (e2e4 → e4, g1f3 → Nf3 approx)."""
+        if len(uci) < 4:
+            return uci
+        # Just show destination square for moves, which is most useful
+        promo = uci[4].upper() if len(uci) >= 5 else ""
+        return uci[2:4] + promo if not promo else uci[2:4] + "=" + promo
 
     def _draw_game(self):
         fs, fm, fl, ft = _fonts()
@@ -337,9 +373,11 @@ class OLEDDisplay:
                     b = history[i + 1] if i + 1 < len(history) else "..."
                     pairs.append((i // 2 + 1, w, b))
                 for num, wm, bm in pairs[-3:]:
+                    wm_r = self._uci_to_san_approx(wm)
+                    bm_r = self._uci_to_san_approx(bm) if bm != "..." else "..."
                     draw.text((0,  y), f"{num}.", font=ft, fill="white")
-                    draw.text((16, y), wm,         font=ft, fill="white")
-                    draw.text((64, y), bm,          font=ft, fill="white")
+                    draw.text((16, y), wm_r,       font=ft, fill="white")
+                    draw.text((64, y), bm_r,        font=ft, fill="white")
                     y += 9
 
                 # ── Status bar ────────────────────────────────────────────────
@@ -347,8 +385,7 @@ class OLEDDisplay:
                 status = (self._status_msg or
                           (f"Last: {self._last_move}" if self._last_move
                            else "Game in progress"))
-                # Truncate so it fits
-                draw.text((2, H - 10), status[:22], font=ft, fill="white")
+                draw.text((2, H - 10), status[:24], font=ft, fill="white")
 
     def _draw_hint(self, uci: str):
         fs, fm, fl, ft = _fonts()
@@ -360,7 +397,7 @@ class OLEDDisplay:
                 draw.rectangle((0, 0, W - 1, 14), fill="white")
                 draw.text((4, 1), "Hint", font=fm, fill="black")
                 draw.text((14, 22), readable, font=fl, fill="white")
-                draw.text((4, 50), "Btn HINT again to dismiss", font=ft, fill="white")
+                draw.text((4, 50), "Press hint to dismiss", font=ft, fill="white")
 
     def _draw_promotion_select(self, colour: str):
         fs, fm, fl, ft = _fonts()
@@ -462,6 +499,90 @@ class OLEDDisplay:
                 if bar_w > 0:
                     draw.rectangle((4, 34, 4 + bar_w, 46), fill="white")
                 draw.text((4, 50), f"Starting... {pct}%", font=ft, fill="white")
+
+    def _draw_status_overlay(self, msg: str):
+        """Brief status message on any screen."""
+        fs, fm, fl, ft = _fonts()
+        with self._lock:
+            with canvas(self._device) as draw:
+                draw.rectangle((0, 0, W - 1, H - 1), fill="black")
+                draw.rectangle((0, 0, W - 1, 14), fill="white")
+                draw.text((4, 1), "Status", font=fs, fill="black")
+                # Word-wrap the message
+                words = msg.split()
+                lines = []
+                line = ""
+                for w in words:
+                    test = (line + " " + w).strip()
+                    if len(test) <= 20:
+                        line = test
+                    else:
+                        if line:
+                            lines.append(line)
+                        line = w
+                if line:
+                    lines.append(line)
+                y = 18
+                for l in lines[:3]:
+                    draw.text((4, y), l, font=fs, fill="white")
+                    y += 14
+
+    def _draw_draw(self, reason: str):
+        fs, fm, fl, ft = _fonts()
+        with self._lock:
+            with canvas(self._device) as draw:
+                draw.rectangle((0, 0, W - 1, H - 1), fill="black")
+                draw.rectangle((2, 2, W - 3, H - 3), outline="white")
+                draw.rectangle((5, 5, W - 6, H - 6), outline="white")
+                draw.text((8, 10), "DRAW!", font=fm, fill="white")
+                draw.text((8, 28), reason[:20], font=fs, fill="white")
+                draw.text((8, 40), f"{len(self._move_history)} moves", font=ft, fill="white")
+                draw.text((8, 52), "OK = new game", font=ft, fill="white")
+
+    def _draw_pass_board(self, next_turn: str, move_count: int):
+        fs, fm, fl, ft = _fonts()
+        colour_fill = "white" if next_turn == "White" else "gray"
+        text_fill   = "black" if next_turn == "White" else "white"
+        with self._lock:
+            with canvas(self._device) as draw:
+                draw.rectangle((0, 0, W - 1, H - 1), fill="black")
+                draw.rectangle((0, 0, W - 1, 18), fill=colour_fill)
+                draw.text((4, 2), f"{next_turn}'s Turn", font=fm, fill=text_fill)
+                draw.text((4, 22), "Pass the board", font=fs, fill="white")
+                draw.text((4, 34), "to next player", font=fs, fill="white")
+                draw.text((4, 50), f"Move {move_count // 2 + 1}", font=ft, fill="white")
+
+    def _draw_network_info(self, ip: str):
+        fs, fm, fl, ft = _fonts()
+        with self._lock:
+            with canvas(self._device) as draw:
+                draw.rectangle((0, 0, W - 1, H - 1), fill="black")
+                draw.rectangle((0, 0, W - 1, 14), fill="white")
+                draw.text((4, 1), "Web Dashboard", font=fs, fill="black")
+                draw.text((4, 18), "Connect at:", font=ft, fill="white")
+                draw.text((4, 28), f"http://{ip}", font=ft, fill="white")
+                draw.text((4, 40), f"port 5000", font=ft, fill="white")
+                draw.line((0, 52, W - 1, 52), fill="white")
+                draw.text((4, 54), "Starting game...", font=ft, fill="white")
+
+    def _draw_coordinate_prompt(self, step: str, partial: str = ""):
+        """Show column/row selection state in the game screen status bar."""
+        fs, fm, fl, ft = _fonts()
+        with self._lock:
+            with canvas(self._device) as draw:
+                draw.rectangle((0, 0, W - 1, H - 1), fill="black")
+                draw.rectangle((0, 0, W - 1, 14), fill="white")
+                label = "Select FROM" if not partial else f"From: {partial}"
+                draw.text((4, 1), label, font=fs, fill="black")
+                if step == "col":
+                    draw.text((4, 18), "Press 1-8 for", font=ft, fill="white")
+                    draw.text((4, 28), "A  B  C  D", font=fs, fill="white")
+                    draw.text((4, 40), "E  F  G  H", font=fs, fill="white")
+                elif step == "row":
+                    draw.text((4, 18), "Press 1-8 for", font=ft, fill="white")
+                    draw.text((4, 28), "row  1-8", font=fm, fill="white")
+                    if partial:
+                        draw.text((4, 48), f"Col: {partial[-1].upper()}", font=fs, fill="white")
 
     def _draw_clock(self):
         fs, fm, fl, ft = _fonts()

@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 # =============================================================================
 # main.py
@@ -101,14 +102,32 @@ class ChessGame:
         self._web_move_queue: list = []
         self._web_move_event  = threading.Event()
 
+        # Web setup — used during mode/difficulty/time selection from browser
+        self._web_setup_answer = None
+        self._web_setup_event  = threading.Event()
+
+        # Web mode select
+        self._web_mode_queue: list = []
+        self._web_mode_event  = threading.Event()
+
+        # Which side the web controls in LocalHuman mode (None = buttons only)
+        self._web_player: str | None = None
+
+        # Hint press counter for disco easter egg
+        self._hint_count = 0
+        self._last_hint_time_disco = 0.0
+
         web_server.register_callbacks(
-            new_game     = self._new_game_sequence,
-            hint         = lambda: self._hint_isr(None),
-            set_theme    = self.anim.set_theme,
-            move_input   = self._web_move_received,
-            undo         = self._undo_sequence,
-            save_usb     = self._save_to_usb,
-            toggle_voice = self._toggle_voice,
+            new_game         = self._new_game_sequence,
+            hint             = lambda: self._hint_isr(None),
+            set_theme        = self.anim.set_theme,
+            move_input       = self._web_move_received,
+            undo             = self._undo_sequence,
+            save_usb         = self._save_to_usb,
+            toggle_voice     = self._toggle_voice,
+            web_mode_select  = self._web_mode_received,
+            web_setup_answer = self._web_setup_received,
+            disco            = self._disco_mode,
         )
         web_server.start_server()
         web_server.update_state(voice_enabled=self._voice_enabled)
@@ -145,6 +164,8 @@ class ChessGame:
             self.oled.show_loading(i + 1, 64)
             time.sleep(CFG.startup_led_delay_s)
 
+        self.oled.show_network_info(self._get_local_ip())
+        time.sleep(2.0)
         self._choose_game_mode()
         self._setup_game()
         self.anim.show_board_themed()
@@ -158,8 +179,8 @@ class ChessGame:
                 raise _NewGameException()
 
             current = self._current_turn()
-            self.oled.show_game(current, status="Your move...",
-                                eval_score=self.stockfish.evaluate(self.board.fen()))
+            # Eval is cached from last push_move — don't block here
+            self.oled.show_game(current, status="Your move...")
             web_server.update_state(whose_turn=current, status="Your move",
                                     usb_available=usb.is_available())
 
@@ -198,12 +219,21 @@ class ChessGame:
             is_check     = cb.is_check()
             is_checkmate = cb.is_checkmate()
 
-            if is_check and not is_checkmate:
+            if is_checkmate:
+                pass  # handled below in _stockfish_turn or LocalHuman end
+            elif cb.is_stalemate():
+                self._end_game_draw("Stalemate")
+                return
+            elif cb.is_insufficient_material():
+                self._end_game_draw("Insufficient material")
+                return
+            elif cb.is_seventyfive_moves():
+                self._end_game_draw("75-move rule")
+                return
+            elif is_check:
                 king_sq = cb.king(cb.turn)
                 if king_sq is not None:
                     self.anim.check_alert(king_sq % 8, 7 - (king_sq // 8))
-                else:
-                    log.warning("Could not determine king square for check alert")
                 self.oled.show_status("CHECK!")
                 web_server.update_state(status="CHECK!")
                 if self._voice_enabled:
@@ -226,12 +256,11 @@ class ChessGame:
             elif self.game_mode == "LocalHuman":
                 # Just swap turns; the other human uses the same input loop
                 next_turn = self._current_turn()
-                self.oled.show_game(next_turn, status=f"Pass to {next_turn}",
-                                    move_history=self.board._move_history_uci())
+                self.oled.show_pass_board(next_turn, self.board.move_count())
                 if self._voice_enabled:
-                    voice.announce_status(f"Pass to {next_turn}")
-                # Brief pause so the player can hand over the board
-                time.sleep(1.5)
+                    voice.announce_status(f"Pass the board to {next_turn}")
+                # Give time to hand over the board
+                time.sleep(3.0)
 
             self.anim.show_board_themed()
             self.oled.show_game(
@@ -288,8 +317,6 @@ class ChessGame:
             king_sq = cb_after.king(cb_after.turn)
             if king_sq is not None:
                 self.anim.check_alert(king_sq % 8, 7 - (king_sq // 8))
-            else:
-                log.warning("King square is None while reporting check")
             self.oled.show_status("CHECK!")
             web_server.update_state(status="CHECK!")
 
@@ -318,86 +345,133 @@ class ChessGame:
         self.oled.show_mode_select()
         self.leds.control_panel_fill((255, 255, 255), start=0, count=5)
         self.leds.panel_show()
+        web_server.update_state(setup_phase="mode_select")
 
         if self._voice_enabled:
             voice.announce_status(
-                "Select game mode. Press 1 for Stockfish, 2 for Lichess, 3 for local two player."
+                "Select game mode. Press 1 for AI, 2 for Lichess, 3 for local two player."
             )
 
         while True:
-            btn = self.buttons.detect_button()
-            time.sleep(0.3)
+            # Check web mode selection
+            if self._web_mode_event.wait(timeout=0.02):
+                self._web_mode_event.clear()
+                if self._web_mode_queue:
+                    self._apply_web_mode(self._web_mode_queue.pop(0))
+                    break
+                continue
+
+            # Physical button fallback (1=AI, 2=Lichess, 3=Local)
+            btn = self.buttons.detect_button_nowait()
             if btn == 1:
                 self.game_mode = "Stockfish"
+                self._web_player = None
                 self.display.confirm_ai_mode()
                 if self._voice_enabled:
                     voice.announce_status("AI mode selected")
                 break
             elif btn == 2:
                 self.game_mode = "OnlineHuman"
+                self._web_player = None
                 self.display.confirm_online_mode()
                 if self._voice_enabled:
                     voice.announce_status("Online mode selected")
                 break
             elif btn == 3:
                 self.game_mode = "LocalHuman"
+                self._web_player = None
                 self.display.confirm_local_mode()
                 if self._voice_enabled:
                     voice.announce_status("Local two player mode selected")
                 break
+            time.sleep(0.03)
 
-        web_server.update_state(game_mode=self.game_mode)
-        log.info(f"Mode: {self.game_mode}")
+        web_server.update_state(game_mode=self.game_mode, setup_phase="idle",
+                                web_player=self._web_player)
+        log.info(f"Mode: {self.game_mode}, web_player: {self._web_player}")
+
+    def _apply_web_mode(self, web_mode: str):
+        """Map web mode string to internal game_mode + web_player."""
+        if web_mode == "stockfish":
+            self.game_mode = "Stockfish"; self._web_player = None
+        elif web_mode == "lichess":
+            self.game_mode = "OnlineHuman"; self._web_player = None
+        elif web_mode == "local":
+            self.game_mode = "LocalHuman"; self._web_player = None
+        elif web_mode == "web_vs_ai":
+            self.game_mode = "Stockfish"; self._web_player = "White"
+        elif web_mode == "web_local":
+            self.game_mode = "LocalHuman"; self._web_player = "both"
+        else:
+            self.game_mode = "Stockfish"; self._web_player = None
 
     def _setup_game(self):
         self.leds.control_panel_fill((255, 255, 255), start=0, count=4)
         self.leds.panel_show()
 
         if self.game_mode == "Stockfish":
+            # Difficulty
             self.oled.show_setup_difficulty()
             self.display.show_difficulty_icon()
+            web_server.update_state(setup_phase="difficulty", difficulty=CFG.difficulty_default)
             if self._voice_enabled:
-                voice.announce_status("Press buttons 1 to 8 to set difficulty")
-            btn = self.buttons.detect_button()
-            self.difficulty = self._map_range(btn, 1, 8,
-                                              CFG.difficulty_min,
-                                              CFG.difficulty_max)
+                voice.announce_status("Set AI difficulty")
+            ans = self._wait_setup_answer()
+            if isinstance(ans, int):
+                self.difficulty = max(CFG.difficulty_min, min(CFG.difficulty_max, ans))
+            else:
+                btn = int(ans) if ans else 5
+                self.difficulty = self._map_range(btn, 1, 8, CFG.difficulty_min, CFG.difficulty_max)
             self.oled.show_setup_difficulty(self.difficulty)
-            web_server.update_state(difficulty=self.difficulty)
-            time.sleep(0.3)
+            web_server.update_state(difficulty=self.difficulty, setup_phase="time")
 
+            # Move time
             self.oled.show_setup_timeout()
             self.display.show_timeout_icon()
             if self._voice_enabled:
-                voice.announce_status("Press buttons 1 to 8 to set move time")
-            btn = self.buttons.detect_button()
-            self.move_timeout_ms = self._map_range(btn, 1, 8,
-                                                   CFG.movetime_min_ms,
-                                                   CFG.movetime_max_ms)
+                voice.announce_status("Set move time")
+            ans = self._wait_setup_answer()
+            # Web sends ms directly (>= 1000), buttons send 1-8
+            if isinstance(ans, int) and ans >= 1000:
+                self.move_timeout_ms = max(CFG.movetime_min_ms,
+                                           min(CFG.movetime_max_ms, ans))
+            else:
+                btn = int(ans) if ans else 5
+                btn = max(1, min(8, btn))
+                self.move_timeout_ms = self._map_range(btn, 1, 8,
+                                                       CFG.movetime_min_ms,
+                                                       CFG.movetime_max_ms)
             self.oled.show_setup_timeout(self.move_timeout_ms)
-            time.sleep(0.3)
+            web_server.update_state(setup_phase="idle")
+
+            # Web player colour if web_vs_ai mode
+            if self._web_player:
+                web_server.update_state(setup_phase="web_colour")
+                ans = self._wait_setup_answer()
+                self._web_player = str(ans) if ans else "White"
+                web_server.update_state(setup_phase="idle", web_player=self._web_player)
 
         elif self.game_mode == "OnlineHuman":
             self.oled.show_setup_colour()
             self.display.show_colour_choice_icon()
+            web_server.update_state(setup_phase="colour")
             if self._voice_enabled:
-                voice.announce_status("Press 1 for White, 2 for Black")
-            while True:
-                btn = self.buttons.detect_button()
-                time.sleep(0.3)
-                if btn == 1:
-                    self.colour_choice = "white"
-                    break
-                elif btn == 2:
-                    self.colour_choice = "black"
-                    break
+                voice.announce_status("Choose your colour")
+            ans = self._wait_setup_answer()
+            if ans in ("white", "black"):
+                self.colour_choice = ans
+            else:
+                self.colour_choice = "white"
+            web_server.update_state(setup_phase="idle")
             self.lichess.start_game(self.colour_choice)
 
         elif self.game_mode == "LocalHuman":
             self.oled.show_local_game_start()
+            if self._web_player == "both":
+                web_server.update_state(setup_phase="idle")
             if self._voice_enabled:
                 voice.announce_status("Local two player. White plays first. Good luck!")
-            time.sleep(2)
+            time.sleep(1.5)
 
         self.leds.control_panel_fill((10, 10, 10), start=6, count=16)
         self.leds.panel_show()
@@ -462,9 +536,22 @@ class ChessGame:
 
     # ── Game end ───────────────────────────────────────────────────────────
 
+    def _end_game_draw(self, reason: str):
+        """Handle drawn game (stalemate, insufficient material, etc.)."""
+        self.oled.show_draw(reason)
+        web_server.update_state(
+            status=f"Draw — {reason}",
+            game_active=False,
+            draw_reason=reason,
+        )
+        if self._voice_enabled:
+            voice.announce_status(f"Draw! {reason}.")
+        self.anim.rainbow_victory(duration=2.0)
+        self._save_to_usb()
+
     def _end_game(self, winner: str):
         self.oled.show_checkmate(winner)
-        web_server.update_state(status=f"Checkmate! {winner} wins!")
+        web_server.update_state(status=f"Checkmate! {winner} wins!", game_active=False)
         if self._voice_enabled:
             voice.announce_status(f"Checkmate! {winner} wins!")
         self.anim.rainbow_victory(duration=4.0)
@@ -552,6 +639,26 @@ class ChessGame:
     # ── Move input ─────────────────────────────────────────────────────────
 
     def _humans_go(self) -> str:
+        """Get a move from the current human player (buttons or web)."""
+        current = self._current_turn()
+
+        # Web-only player: just wait for a web move
+        web_controls = (
+            self._web_player in ("both", current)
+        )
+
+        if web_controls:
+            self._web_move_event.clear()
+            web_server.update_state(status=f"Your move ({current}) — click a piece")
+            while True:
+                if self._web_move_event.wait(timeout=0.1):
+                    self._web_move_event.clear()
+                    if self._web_move_queue:
+                        return self._web_move_queue.pop(0)
+                if self._new_game_requested.is_set():
+                    raise _NewGameException()
+
+        # Button player (with optional web override)
         btn = 0
         while True:
             self.leds.control_panel_fill((255, 255, 255), start=0, count=4)
@@ -566,7 +673,6 @@ class ChessGame:
             self.display.light_up_move(humans_move, mode="Y")
             btn = 0
             while btn == 0:
-                # Also check for a web dashboard move in the queue
                 if self._web_move_event.wait(timeout=0.05):
                     self._web_move_event.clear()
                     if self._web_move_queue:
@@ -574,7 +680,7 @@ class ChessGame:
                         self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
                         self.leds.panel_show()
                         return web_uci
-                btn = self.buttons.detect_button() if not self._web_move_event.is_set() else 0
+                btn = self.buttons.detect_button_nowait() or 0
             if btn == 9:
                 self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
                 self.leds.panel_show()
@@ -587,18 +693,24 @@ class ChessGame:
                    5: "e", 6: "f", 7: "g", 8: "h"}
         row_map = {1: "1", 2: "2", 3: "3", 4: "4",
                    5: "5", 6: "6", 7: "7", 8: "8"}
+        col_names = {1:"A", 2:"B", 3:"C", 4:"D", 5:"E", 6:"F", 7:"G", 8:"H"}
+        row_names = {1:"1", 2:"2", 3:"3", 4:"4", 5:"5", 6:"6", 7:"7", 8:"8"}
+
         column = None
         while column is None:
-            btn    = (already_pressed if already_pressed != 0
-                      else self.buttons.detect_button())
+            btn = already_pressed if already_pressed != 0 else self.buttons.detect_button()
             already_pressed = 0
             column = col_map.get(btn)
-        time.sleep(0.3)
+            if column:
+                self.oled.show_status(f"Column {col_names[btn]} — now press row (1-8)")
+        time.sleep(0.1)
         row = None
         while row is None:
             btn = self.buttons.detect_button()
             row = row_map.get(btn)
-        time.sleep(0.3)
+            if row:
+                self.oled.show_status(f"→ {column.upper()}{row}")
+        time.sleep(0.1)
         return column + row
 
     def _web_move_received(self, uci: str):
@@ -607,15 +719,62 @@ class ChessGame:
         self._web_move_event.set()
         log.info(f"Web move queued: {uci}")
 
+    def _web_mode_received(self, mode: str):
+        """Called from web server when browser selects a game mode."""
+        self._web_mode_queue.append(mode)
+        self._web_mode_event.set()
+        log.info(f"Web mode queued: {mode}")
+
+    def _web_setup_received(self, value):
+        """Called from web server when browser answers a setup prompt."""
+        self._web_setup_answer = value
+        self._web_setup_event.set()
+        log.info(f"Web setup answer: {value}")
+
+    def _wait_setup_answer(self):
+        """Block until setup answer arrives from web or physical buttons."""
+        self._web_setup_event.clear()
+        self._web_setup_answer = None
+        while True:
+            if self._web_setup_event.wait(timeout=0.05):
+                self._web_setup_event.clear()
+                return self._web_setup_answer
+            btn = self.buttons.detect_button_nowait()
+            if btn:
+                return btn
+            time.sleep(0.02)
+
+    def _disco_mode(self):
+        """Easter egg: disco light show on the chess board LEDs."""
+        import random
+        log.info("🕺 DISCO MODE ACTIVATED")
+        self.anim.stop_thinking_animation()
+        web_server.update_state(disco_active=True, status="🕺 DISCO MODE!")
+        self.oled.show_status("🕺 DISCO!")
+        end = time.time() + 15.0
+        while time.time() < end:
+            for i in range(64):
+                r = random.randint(0, 255)
+                g = random.randint(0, 255)
+                b = random.randint(0, 255)
+                col = i % 8
+                row = i // 8
+                self.leds.chess_set_pixel(col, row, (r, g, b))
+            self.leds.chess_show()
+            time.sleep(0.05)
+        web_server.update_state(disco_active=False, status="Your move")
+        self.anim.show_board_themed()
+
     # ── Validation ─────────────────────────────────────────────────────────
 
     def _check_move_legal(self, move_uci: str) -> bool:
-        for _ in range(30):
+        for _ in range(10):
             result = self.stockfish.is_legal(self.board.fen(), move_uci)
             if result is not None:
                 return result
-            time.sleep(0.1)
-        return True
+            time.sleep(0.05)
+        log.warning(f"is_legal timed out for {move_uci} — rejecting")
+        return False
 
     def _check_for_checkmate(self, hint: str, attacker_move: str):
         if not hint or len(hint) < 3:
@@ -633,8 +792,19 @@ class ChessGame:
         if self.buttons and self.buttons.is_ok_held():
             self._new_game_requested.set()
             return
-        # Hold hint alone → shutdown
-        # (single tap is handled below)
+
+        # Count rapid hint presses for disco easter egg (10 in 5 seconds)
+        now = time.time()
+        if now - self._last_hint_time_disco < 5.0:
+            self._hint_count += 1
+        else:
+            self._hint_count = 1
+        self._last_hint_time_disco = now
+        if self._hint_count >= 10:
+            self._hint_count = 0
+            threading.Thread(target=self._disco_mode, daemon=True).start()
+            return
+
         if self.suggested_best_move and len(self.suggested_best_move) >= 3:
             self.leds.control_panel_fill((0, 0, 0), start=0, count=4)
             self.leds.control_panel_set_pixel(5, (0, 0, 255))
@@ -667,6 +837,8 @@ class ChessGame:
         self.suggested_best_move = ""
         self._clock = {"White": 0.0, "Black": 0.0}
         self._clock_start = None
+        self._web_player = None
+        self._hint_count = 0
         self.leds.control_panel_set_pixel(5, (0, 0, 0))
         self.leds.control_panel_fill((255, 255, 255), start=0, count=5)
         self.leds.panel_show()
@@ -719,6 +891,19 @@ class ChessGame:
             status=f"{player}: {uci}",
             eval_score=eval_score,
         )
+
+    @staticmethod
+    def _get_local_ip() -> str:
+        """Return the local network IP address for the web dashboard URL."""
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "localhost"
 
     @staticmethod
     def _map_range(value, in_min, in_max, out_min, out_max):

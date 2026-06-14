@@ -1,9 +1,26 @@
 # =============================================================================
 # web/server.py
 # Author : Richard Pu
-# Created: 2026-06-10  |  Revised: 2026-06-12
+# Created: 2026-06-10  |  Revised: 2026-06-14
 # Purpose: Real-time web dashboard for the Jetson smart chessboard.
-#          Accessible from any device on the same network at http://<ip>:5000.
+#
+# Features
+# ────────
+#  • Interactive canvas chess board — click to move pieces
+#  • Legal move highlighting
+#  • Light / dark mode
+#  • Google Sans typography
+#  • Custom LED theme builder
+#  • USB game save + PGN download
+#  • OTA git-pull + restart (token-protected)
+#  • Undo, hint, new game controls
+#  • Voice toggle
+#  • Dev menu (PIN-protected, default PIN in CFG)
+#  • About modal
+#  • Game mode selection from web (vs AI / local 2P / web 2P)
+#  • Difficulty + time control from web
+#  • Web player 2 input for LocalHuman mode
+#  • Disco easter egg (hint button ×10 or secret web button)
 # =============================================================================
 
 import os
@@ -38,32 +55,40 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 # ── Shared state ───────────────────────────────────────────────────────────────
 
 _state = {
-    "fen":           chess.STARTING_FEN,
-    "move_history":  [],
-    "whose_turn":    "White",
-    "game_mode":     "—",
-    "difficulty":    0,
-    "last_move":     None,
-    "status":        "Waiting to start",
-    "thinking":      False,
-    "theme":         "classic",
-    "custom_theme":  None,
-    "eval_score":    0,
-    "hint_move":     "",
-    "game_active":   False,
-    "usb_available": False,
-    "voice_enabled": False,
+    "fen":              chess.STARTING_FEN,
+    "move_history":     [],
+    "whose_turn":       "White",
+    "game_mode":        "—",
+    "difficulty":       0,
+    "last_move":        "",
+    "status":           "Waiting to start",
+    "thinking":         False,
+    "theme":            "classic",
+    "custom_theme":     None,
+    "eval_score":       0,
+    "hint_move":        "",
+    "game_active":      False,
+    "usb_available":    False,
+    "voice_enabled":    False,
+    "setup_phase":      "idle",    # idle | mode_select | difficulty | time | colour | ready
+    "web_player":       None,      # None | "White" | "Black" — which side web controls in LocalHuman
+    "disco_active":     False,
+    "led_grid":         [[0,0,0]]*64,
+    "draw_reason":      "",
 }
 _state_lock = threading.Lock()
 
 _callbacks = {
-    "new_game":     None,
-    "hint":         None,
-    "set_theme":    None,
-    "move_input":   None,
-    "undo":         None,
-    "save_usb":     None,
-    "toggle_voice": None,
+    "new_game":           None,
+    "hint":               None,
+    "set_theme":          None,
+    "move_input":         None,
+    "undo":               None,
+    "save_usb":           None,
+    "toggle_voice":       None,
+    "web_mode_select":    None,   # called with (mode_str)
+    "web_setup_answer":   None,   # called with (value) during setup
+    "disco":              None,   # easter egg
 }
 
 
@@ -75,13 +100,20 @@ def update_state(**kwargs):
     _push_state()
 
 
+def update_led_grid(grid: list):
+    """Called from LEDController.chess_show() — push live LED colours."""
+    with _state_lock:
+        _state["led_grid"] = grid
+    socketio.emit("led_grid", {"grid": grid})
+
+
 def register_callbacks(**kw):
     for k, v in kw.items():
         if k in _callbacks:
             _callbacks[k] = v
 
 
-def start_server(host: str = None, port: int = None):
+def start_server(host: str | None = None, port: int | None = None):
     h = host or CFG.web_host
     p = port or CFG.web_port
     t = threading.Thread(
@@ -114,8 +146,12 @@ def _push_state():
             "voice_enabled": _state["voice_enabled"],
             "last_move":     _state["last_move"] or "",
             "hint_move":     _state["hint_move"] or "",
+            "setup_phase":   _state["setup_phase"],
+            "web_player":    _state["web_player"],
+            "disco_active":  _state["disco_active"],
+            "led_grid":      _state["led_grid"],
+            "draw_reason":   _state["draw_reason"],
         }
-
     socketio.emit("state_update", payload)
 
 
@@ -226,7 +262,7 @@ def api_update():
 
 @socketio.on("connect")
 def on_connect():
-    log.info(f"Dashboard client connected: {request.sid}")
+    sid = getattr(request, "sid", "unknown"); log.info(f"Dashboard client connected: {sid}")
     _push_state()
 
 @socketio.on("new_game")
@@ -272,21 +308,15 @@ def on_set_custom_theme(data):
 
 @socketio.on("get_legal_moves")
 def on_get_legal_moves(data):
-    """Return all legal UCI moves from a given square in the current FEN."""
     try:
-        fen = data.get("fen") or chess.STARTING_FEN
+        fen    = data.get("fen") or chess.STARTING_FEN
         sq_alg = data.get("sq", "")
-        board = chess.Board(fen)
-        # Find the square index
-        sq = chess.parse_square(sq_alg)
-        moves = [
-            m.uci() for m in board.legal_moves
-            if m.from_square == sq
-        ]
+        board  = chess.Board(fen)
+        sq     = chess.parse_square(sq_alg)
+        moves  = [m.uci() for m in board.legal_moves if m.from_square == sq]
         emit("legal_moves", {"moves": moves, "sq": sq_alg})
-    except Exception as e:
+    except Exception:
         emit("legal_moves", {"moves": [], "sq": data.get("sq", "")})
-
 
 @socketio.on("move_input")
 def on_move_input(data):
@@ -299,10 +329,30 @@ def on_move_input(data):
         threading.Thread(target=_callbacks["move_input"],
                          args=(uci,), daemon=True).start()
 
+@socketio.on("web_mode_select")
+def on_web_mode_select(data):
+    mode = data.get("mode", "")
+    log.info(f"Web mode select: {mode}")
+    if _callbacks["web_mode_select"]:
+        threading.Thread(target=_callbacks["web_mode_select"],
+                         args=(mode,), daemon=True).start()
+
+@socketio.on("web_setup_answer")
+def on_web_setup_answer(data):
+    value = data.get("value")
+    log.info(f"Web setup answer: {value}")
+    if _callbacks["web_setup_answer"]:
+        threading.Thread(target=_callbacks["web_setup_answer"],
+                         args=(value,), daemon=True).start()
+
+@socketio.on("disco")
+def on_disco():
+    log.info("Disco easter egg triggered from web!")
+    if _callbacks["disco"]:
+        threading.Thread(target=_callbacks["disco"], daemon=True).start()
 
 @socketio.on("get_dev_settings")
 def on_get_dev_settings():
-    """Return all live-editable CFG values to the dev menu."""
     emit("dev_settings", {
         "difficulty_default":  CFG.difficulty_default,
         "difficulty_min":      CFG.difficulty_min,
@@ -320,16 +370,11 @@ def on_get_dev_settings():
         "tts_volume":          CFG.tts_volume,
         "web_port":            CFG.web_port,
         "pgn_subdir":          CFG.pgn_subdir,
+        "dev_pin":             CFG.dev_pin,
     })
-
 
 @socketio.on("apply_dev_settings")
 def on_apply_dev_settings(data):
-    """
-    Live-apply developer settings to the running CFG singleton.
-    Changes take effect immediately for the current session.
-    They are NOT written back to .env — restart reverts them.
-    """
     changed = []
     def _set(attr, key, cast):
         val = data.get(key)
@@ -356,6 +401,7 @@ def on_apply_dev_settings(data):
     _set("tts_volume",           "tts_volume",            float)
     _set("web_port",             "web_port",              int)
     _set("pgn_subdir",           "pgn_subdir",            str)
+    _set("dev_pin",              "dev_pin",               str)
 
     log.info(f"Dev settings applied: {', '.join(changed)}")
     emit("dev_settings_saved", {
@@ -366,7 +412,6 @@ def on_apply_dev_settings(data):
 
 
 # ── Dashboard HTML ─────────────────────────────────────────────────────────────
-
 
 DASHBOARD_HTML = r"""
 <!DOCTYPE html>
@@ -380,774 +425,843 @@ DASHBOARD_HTML = r"""
 <link href="https://fonts.googleapis.com/css2?family=Google+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Google+Sans+Mono&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
 <style>
-/* ── Design tokens ── */
 :root {
   --gold:       #c9a84c;
   --gold-dim:   #9a7a30;
   --gold-glow:  rgba(201,168,76,0.15);
-  --font-mono:  'Google Sans Mono', 'Fira Mono', monospace;
-  --font-sans:  'Google Sans', system-ui, sans-serif;
-  --r:          8px;
-  --r-lg:       14px;
-  --t:          0.18s ease;
-}
-[data-theme="dark"] {
-  --bg:       #111418; --surface: #191d23; --surface2: #20252d;
-  --border:   rgba(255,255,255,0.08); --border-h: rgba(255,255,255,0.16);
-  --text:     #e8e6e1; --text2: #9a9690; --text3: #5a5855;
-  --bb:       rgba(255,255,255,0.06);
-  --sq-l:     #b0956e; --sq-d: #6e4e2e;
+  --bg:         #111318;
+  --surface:    #1e2128;
+  --surface2:   #272c36;
+  --border:     #2e3340;
+  --text:       #e8eaf0;
+  --text-dim:   #8c93a8;
+  --green:      #4caf50;
+  --red:        #f44336;
+  --blue:       #4fc3f7;
+  --r-sm:       6px;
+  --r-md:       10px;
+  --r-lg:       16px;
+  --r-xl:       22px;
 }
 [data-theme="light"] {
-  --bg:       #f4f1ec; --surface: #ffffff; --surface2: #f0ede8;
-  --border:   rgba(0,0,0,0.10); --border-h: rgba(0,0,0,0.22);
-  --text:     #1a1713; --text2: #6b6460; --text3: #b0ada8;
-  --bb:       rgba(0,0,0,0.05);
-  --sq-l:     #f0d9b5; --sq-d: #b58863;
+  --bg:       #f4f5f7;
+  --surface:  #ffffff;
+  --surface2: #eef0f4;
+  --border:   #d0d4de;
+  --text:     #1a1d26;
+  --text-dim: #5a6070;
 }
-
-/* ── Reset ── */
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html{font-size:15px}
-body{font-family:var(--font-sans);background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Google Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+a{color:var(--gold);text-decoration:none}
 
 /* ── Topbar ── */
-.topbar{display:flex;align-items:center;gap:10px;padding:0 20px;height:56px;background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100}
-.logo{font-size:1.1rem;font-weight:600;letter-spacing:-0.02em;color:var(--gold);display:flex;align-items:center;gap:8px;white-space:nowrap}
-.logo svg{width:22px;height:22px;flex-shrink:0}
-.spacer{flex:1}
-.badge{font-size:0.72rem;font-weight:500;padding:3px 9px;border-radius:20px;background:var(--bb);border:1px solid var(--border);color:var(--text2);white-space:nowrap}
-.badge.gold{background:var(--gold-glow);border-color:var(--gold-dim);color:var(--gold)}
-.conn-dot{width:8px;height:8px;border-radius:50%;background:#dc4646;transition:background var(--t);flex-shrink:0}
-.conn-dot.live{background:#50be64}
-.tbtn{background:none;border:1px solid var(--border);border-radius:var(--r);padding:6px 11px;cursor:pointer;color:var(--text2);font-size:0.78rem;font-family:var(--font-sans);transition:all var(--t);display:flex;align-items:center;gap:5px}
-.tbtn:hover{border-color:var(--border-h);color:var(--text)}
-.tbtn.dev-unlocked{border-color:var(--gold-dim);color:var(--gold)}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100}
+.topbar-left{display:flex;align-items:center;gap:12px}
+.logo{font-size:18px;font-weight:600;color:var(--gold);letter-spacing:.3px}
+.conn-dot{width:8px;height:8px;border-radius:50%;background:var(--red);transition:.3s}
+.conn-dot.on{background:var(--green)}
+.topbar-right{display:flex;align-items:center;gap:8px}
+.icon-btn{background:none;border:1px solid var(--border);border-radius:var(--r-md);padding:6px 10px;cursor:pointer;color:var(--text-dim);font-size:14px;transition:.2s;display:flex;align-items:center;gap:5px}
+.icon-btn:hover{border-color:var(--gold);color:var(--gold)}
 
 /* ── Layout ── */
-.layout{display:grid;grid-template-columns:1fr 336px;gap:16px;padding:16px;max-width:1120px;margin:0 auto}
-@media(max-width:900px){.layout{grid-template-columns:1fr}}
-
-/* ── Cards ── */
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:16px}
-.card-title{font-size:0.68rem;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:var(--text3);margin-bottom:12px}
+.main{display:grid;grid-template-columns:1fr 340px;gap:16px;padding:16px;max-width:1200px;margin:0 auto}
+@media(max-width:900px){.main{grid-template-columns:1fr}}
 
 /* ── Board ── */
-#board-wrap{position:relative;width:100%;max-width:520px;margin:0 auto}
-#board-canvas{display:block;width:100%;aspect-ratio:1;border-radius:var(--r);cursor:pointer;touch-action:none}
+.board-wrap{background:var(--surface);border-radius:var(--r-xl);padding:16px;border:1px solid var(--border)}
+.board-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.turn-badge{padding:4px 14px;border-radius:20px;font-size:13px;font-weight:500;background:var(--gold-glow);border:1px solid var(--gold-dim);color:var(--gold)}
+.board-container{position:relative;display:flex;justify-content:center}
+canvas{border-radius:var(--r-md);cursor:pointer;max-width:100%;touch-action:none}
+.board-footer{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap}
 
-/* ── Eval bar ── */
-.eval-wrap{width:100%;margin-top:10px}
-.eval-track{height:6px;border-radius:3px;background:var(--surface2);overflow:hidden;position:relative}
-.eval-w{position:absolute;left:0;top:0;bottom:0;background:var(--sq-l);transition:width 0.5s cubic-bezier(.4,0,.2,1)}
-.eval-labels{display:flex;justify-content:space-between;font-size:0.68rem;color:var(--text3);font-family:var(--font-mono);margin-top:4px}
+/* ── Setup overlay on board ── */
+.setup-panel{display:none;position:absolute;inset:0;background:rgba(17,19,24,.92);border-radius:var(--r-md);flex-direction:column;align-items:center;justify-content:center;gap:16px;z-index:10;padding:20px}
+.setup-panel.show{display:flex}
+.setup-title{font-size:18px;font-weight:600;color:var(--gold);text-align:center}
+.setup-sub{font-size:13px;color:var(--text-dim);text-align:center;max-width:260px}
+.setup-btns{display:flex;flex-wrap:wrap;gap:10px;justify-content:center}
+.setup-btn{padding:10px 20px;border-radius:var(--r-md);border:1px solid var(--border);background:var(--surface2);color:var(--text);font-family:'Google Sans',sans-serif;font-size:14px;font-weight:500;cursor:pointer;transition:.2s;min-width:80px}
+.setup-btn:hover,.setup-btn.active{border-color:var(--gold);color:var(--gold);background:var(--gold-glow)}
+.setup-slider{width:100%;max-width:260px}
+.setup-slider-val{font-size:24px;font-weight:600;color:var(--gold);min-width:60px;text-align:center}
 
-/* ── Turn banner ── */
-.turn-banner{width:100%;padding:10px 14px;border-radius:var(--r);font-weight:600;font-size:0.88rem;display:flex;align-items:center;gap:8px;transition:all var(--t);margin-top:10px}
-.turn-banner.white{background:rgba(240,217,181,0.15);border:1px solid rgba(240,217,181,0.30);color:var(--sq-l)}
-.turn-banner.black{background:rgba(100,80,60,0.20);border:1px solid rgba(100,80,60,0.40);color:#b09070}
-.turn-banner.thinking{background:var(--gold-glow);border:1px solid var(--gold-dim);color:var(--gold);animation:think-p 1.2s ease-in-out infinite}
-@keyframes think-p{0%,100%{opacity:1}50%{opacity:0.6}}
-.turn-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-.turn-banner.white .turn-dot{background:#f0d9b5}
-.turn-banner.black .turn-dot{background:#b09070}
-.turn-banner.thinking .turn-dot{background:var(--gold);animation:think-d .6s ease-in-out infinite alternate}
-@keyframes think-d{from{transform:scale(1)}to{transform:scale(1.6)}}
+/* ── Sidebar ── */
+.sidebar{display:flex;flex-direction:column;gap:12px}
+.card{background:var(--surface);border-radius:var(--r-lg);padding:16px;border:1px solid var(--border)}
+.card-title{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--text-dim);margin-bottom:12px}
+.status-text{font-size:14px;color:var(--text);line-height:1.5}
+.eval-bar-wrap{margin-top:8px;height:6px;border-radius:3px;background:var(--surface2);overflow:hidden}
+.eval-bar{height:100%;border-radius:3px;background:var(--gold);transition:width .4s}
 
-/* ── Status ── */
-.status-line{font-size:0.80rem;color:var(--text2);padding:8px 12px;background:var(--surface2);border-radius:var(--r);margin-top:8px;min-height:34px;display:flex;align-items:center;font-family:var(--font-mono);border:1px solid var(--border)}
-
-/* ── Right col ── */
-.right-col{display:flex;flex-direction:column;gap:12px}
-
-/* ── Stats ── */
-.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.stat-cell{background:var(--surface2);border-radius:var(--r);padding:10px 12px;border:1px solid var(--border)}
-.stat-label{font-size:0.65rem;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px}
-.stat-value{font-family:var(--font-mono);font-size:1.05rem;font-weight:600;color:var(--gold)}
+/* ── Controls ── */
+.ctrl-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.ctrl-btn{padding:10px 8px;border-radius:var(--r-md);border:1px solid var(--border);background:var(--surface2);color:var(--text);font-family:'Google Sans',sans-serif;font-size:13px;font-weight:500;cursor:pointer;transition:.2s;display:flex;align-items:center;justify-content:center;gap:5px}
+.ctrl-btn:hover{border-color:var(--gold);color:var(--gold)}
+.ctrl-btn.primary{background:var(--gold);border-color:var(--gold);color:#111;font-weight:600}
+.ctrl-btn.primary:hover{background:var(--gold-dim)}
+.ctrl-btn.danger{border-color:var(--red);color:var(--red)}
+.ctrl-btn.danger:hover{background:rgba(244,67,54,.1)}
+.ctrl-btn:disabled{opacity:.4;cursor:not-allowed}
+.ctrl-btn.full{grid-column:1/-1}
 
 /* ── Move history ── */
-.move-history{max-height:200px;overflow-y:auto;font-family:var(--font-mono);font-size:0.78rem}
-.move-history::-webkit-scrollbar{width:3px}
-.move-history::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-.move-row{display:grid;grid-template-columns:28px 1fr 1fr;gap:6px;padding:3px 0;border-bottom:1px solid var(--border);align-items:center}
-.move-row:last-child{border-bottom:none}
-.move-num{color:var(--text3);font-size:.70rem}
-.move-w,.move-b{color:var(--text2)}
-.move-row.latest .move-w,.move-row.latest .move-b{color:var(--gold);font-weight:600}
-.move-empty{color:var(--text3);font-size:.78rem;font-style:italic}
+.history-list{max-height:160px;overflow-y:auto;font-family:'Google Sans Mono',monospace;font-size:12px;color:var(--text-dim);display:grid;grid-template-columns:auto 1fr 1fr;gap:2px 8px}
+.history-list .move-num{color:var(--text-dim)}
+.history-list .move-w{color:var(--text)}
+.history-list .move-b{color:var(--text-dim)}
+.history-list .move-w.last,.history-list .move-b.last{color:var(--gold);font-weight:600}
 
-/* ── Buttons ── */
-.btn-row{display:flex;gap:8px;flex-wrap:wrap}
-.btn{padding:8px 14px;border-radius:var(--r);border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer;font-size:0.82rem;font-family:var(--font-sans);transition:all var(--t);display:flex;align-items:center;gap:6px;white-space:nowrap}
-.btn:hover{border-color:var(--border-h);background:var(--surface)}
-.btn:active{transform:scale(0.97)}
-.btn:disabled{opacity:0.35;pointer-events:none}
-.btn.primary{background:var(--gold-glow);border-color:var(--gold-dim);color:var(--gold);font-weight:600}
-.btn.primary:hover{background:rgba(201,168,76,.22);border-color:var(--gold)}
-.btn.sm{padding:5px 10px;font-size:0.75rem}
-.btn-full{width:100%;justify-content:center}
-
-/* ── Theme swatches ── */
-.theme-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-bottom:10px}
-.theme-sw{aspect-ratio:1;border-radius:6px;cursor:pointer;border:2px solid transparent;transition:all var(--t);display:flex;align-items:flex-end;justify-content:center;overflow:hidden;position:relative;padding-bottom:3px}
-.theme-sw:hover{transform:scale(1.06)}
-.theme-sw.active{border-color:var(--gold)}
-.theme-sw span{font-size:0.52rem;font-weight:600;text-shadow:0 1px 3px rgba(0,0,0,.7);color:#fff;line-height:1;z-index:1}
-.custom-theme-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
-.color-row{display:flex;align-items:center;gap:8px;font-size:0.75rem;color:var(--text2)}
-.color-row input[type=color]{width:28px;height:28px;padding:2px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);cursor:pointer;flex-shrink:0}
-
-/* ── Sys info ── */
-.sys-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border);font-size:0.78rem}
-.sys-row:last-child{border-bottom:none}
-.sys-key{color:var(--text2)}
-.sys-val{font-family:var(--font-mono);color:var(--gold);font-size:0.78rem}
+/* ── Theme ── */
+.theme-pills{display:flex;flex-wrap:wrap;gap:6px}
+.theme-pill{padding:4px 12px;border-radius:20px;border:1px solid var(--border);background:var(--surface2);color:var(--text-dim);font-size:12px;cursor:pointer;transition:.2s}
+.theme-pill:hover,.theme-pill.active{border-color:var(--gold);color:var(--gold)}
+.colour-row{display:flex;gap:10px;margin-top:8px;flex-wrap:wrap}
+.colour-item{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:11px;color:var(--text-dim)}
+input[type=color]{width:36px;height:36px;border:none;padding:0;background:none;cursor:pointer;border-radius:6px}
 
 /* ── Toggle ── */
-.toggle-wrap{display:flex;align-items:center;gap:10px}
-.toggle{position:relative;width:36px;height:20px;flex-shrink:0}
-.toggle input{opacity:0;width:0;height:0;position:absolute}
-.toggle-track{position:absolute;inset:0;background:var(--surface2);border:1px solid var(--border);border-radius:10px;cursor:pointer;transition:all var(--t)}
-.toggle input:checked+.toggle-track{background:var(--gold-glow);border-color:var(--gold-dim)}
-.toggle-thumb{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--text3);transition:all var(--t);pointer-events:none}
-.toggle input:checked~.toggle-thumb{transform:translateX(16px);background:var(--gold)}
-.toggle-label{font-size:0.82rem;color:var(--text2)}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:4px 0}
+.toggle-label{font-size:13px;color:var(--text)}
+label.switch{position:relative;display:inline-block;width:40px;height:22px}
+label.switch input{opacity:0;width:0;height:0}
+.slider-sw{position:absolute;inset:0;background:var(--border);border-radius:11px;transition:.3s;cursor:pointer}
+.slider-sw:before{content:'';position:absolute;width:16px;height:16px;left:3px;bottom:3px;background:white;border-radius:50%;transition:.3s}
+input:checked+.slider-sw{background:var(--gold)}
+input:checked+.slider-sw:before{transform:translateX(18px)}
 
-/* ── OTA ── */
-.ota-out{display:none;background:#0d1117;border-radius:6px;padding:10px;font-family:var(--font-mono);font-size:.70rem;color:#58a65c;max-height:120px;overflow-y:auto;margin-top:8px;border:1px solid rgba(88,166,92,.2);white-space:pre-wrap}
-.divider{height:1px;background:var(--border);margin:10px 0}
-
-/* ── Shared overlay ── */
-.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.74);z-index:200;align-items:center;justify-content:center;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);padding:16px}
-.overlay.show{display:flex}
-.modal-close{position:absolute;top:14px;right:16px;background:none;border:none;cursor:pointer;color:var(--text3);font-size:1rem;line-height:1;padding:4px 6px;border-radius:4px;transition:color var(--t);z-index:1}
+/* ── Overlays ── */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:200;opacity:0;pointer-events:none;transition:opacity .2s}
+.overlay.show{opacity:1;pointer-events:all}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-xl);padding:28px 24px;width:100%;max-width:420px;position:relative;max-height:90vh;overflow-y:auto}
+.modal-close{position:absolute;top:14px;right:16px;background:none;border:none;color:var(--text-dim);font-size:20px;cursor:pointer;line-height:1}
 .modal-close:hover{color:var(--text)}
+.modal h2{font-size:18px;font-weight:600;margin-bottom:16px;color:var(--gold)}
+.field{margin-bottom:12px}
+.field label{display:block;font-size:12px;color:var(--text-dim);margin-bottom:4px}
+.field input,.field select{width:100%;padding:8px 10px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--surface2);color:var(--text);font-family:'Google Sans',sans-serif;font-size:13px}
+.field input:focus,.field select:focus{outline:none;border-color:var(--gold)}
 
-/* ── Promo modal ── */
-.promo-modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:24px;text-align:center;width:100%;max-width:340px;position:relative}
-.promo-modal h3{font-size:.9rem;color:var(--text2);margin-bottom:16px;font-weight:500}
-.promo-pieces{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
-.promo-piece{aspect-ratio:1;border-radius:var(--r);background:var(--surface2);border:1px solid var(--border);cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;font-size:2.2rem;transition:all var(--t)}
-.promo-piece span{font-size:.62rem;color:var(--text3);font-family:var(--font-mono)}
-.promo-piece:hover{border-color:var(--gold-dim);background:var(--gold-glow)}
-
-/* ── PIN modal ── */
+/* ── PIN ── */
 .pin-modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:28px 24px 20px;text-align:center;width:100%;max-width:290px}
-.pin-modal h3{font-size:1rem;font-weight:600;color:var(--text);margin-bottom:4px;display:flex;align-items:center;justify-content:center;gap:8px}
-.pin-modal h3 svg{color:var(--gold)}
-.pin-sub{font-size:.78rem;color:var(--text3);margin-bottom:20px}
-.pin-dots{display:flex;gap:12px;justify-content:center;margin-bottom:22px}
-.pd{width:14px;height:14px;border-radius:50%;border:2px solid var(--border);transition:all var(--t)}
+.pin-title{font-size:16px;font-weight:600;margin-bottom:16px}
+.pin-dots{display:flex;gap:10px;justify-content:center;margin-bottom:16px}
+.pd{width:14px;height:14px;border-radius:50%;border:2px solid var(--border);background:transparent;transition:.2s}
 .pd.filled{background:var(--gold);border-color:var(--gold)}
-.pd.err{background:#dc4646;border-color:#dc4646;animation:pshake .3s ease}
-@keyframes pshake{0%,100%{transform:translateX(0)}25%{transform:translateX(-4px)}75%{transform:translateX(4px)}}
 .pin-numpad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-.pin-key{height:48px;border-radius:var(--r);border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:1.1rem;font-family:var(--font-mono);font-weight:500;cursor:pointer;transition:all var(--t);display:flex;align-items:center;justify-content:center;user-select:none}
-.pin-key:hover{background:var(--surface);border-color:var(--border-h)}
-.pin-key:active{transform:scale(0.93)}
-.pin-key.del{color:var(--text3);font-size:.9rem}
-.pin-key.zero{grid-column:2}
-.pin-err{font-size:.75rem;color:#dc7070;margin-top:12px;min-height:18px;font-family:var(--font-mono)}
+.pin-key{padding:14px;border-radius:var(--r-md);border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:18px;font-weight:600;cursor:pointer;transition:.2s}
+.pin-key:hover{border-color:var(--gold);color:var(--gold)}
+.pin-err{color:var(--red);font-size:12px;min-height:18px;margin-top:8px}
 
-/* ── Dev modal ── */
-.dev-modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);width:100%;max-width:560px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden;position:relative}
-.dev-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border);flex-shrink:0}
-.dev-head h2{font-size:.95rem;font-weight:600;color:var(--text);display:flex;align-items:center;gap:8px}
-.dev-badge{font-size:.62rem;font-weight:700;letter-spacing:.1em;padding:2px 7px;border-radius:4px;background:rgba(220,100,50,.15);border:1px solid rgba(220,100,50,.4);color:#dc6432;text-transform:uppercase}
-.dev-body{overflow-y:auto;padding:16px 20px;flex:1}
-.dev-body::-webkit-scrollbar{width:3px}
-.dev-body::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-.dev-section{margin-bottom:20px}
-.dev-sec-title{font-size:.66rem;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--gold);margin-bottom:10px;display:flex;align-items:center;gap:6px}
-.dev-sec-title::after{content:'';flex:1;height:1px;background:var(--border)}
-.dev-field{display:grid;grid-template-columns:1fr 130px;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)}
-.dev-field:last-child{border-bottom:none}
-.dev-lbl{font-size:.80rem;color:var(--text2);line-height:1.3}
-.dev-lbl small{display:block;font-size:.66rem;color:var(--text3);font-family:var(--font-mono);margin-top:1px}
-.dev-input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:6px 9px;color:var(--text);font-size:.80rem;font-family:var(--font-mono);text-align:right;transition:border-color var(--t)}
-.dev-input:focus{outline:none;border-color:var(--gold-dim)}
-.dev-input.changed{border-color:var(--gold);color:var(--gold)}
-.dev-foot{padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end;flex-shrink:0;background:var(--surface)}
-.dev-note{font-size:.70rem;color:var(--text3);font-family:var(--font-mono);padding:8px 12px;background:var(--surface2);border-radius:var(--r);border:1px solid var(--border);margin-bottom:14px;line-height:1.6}
-.dev-note strong{color:var(--gold);font-weight:500}
+/* ── About ── */
+.about-logo{font-size:32px;font-weight:700;color:var(--gold);text-align:center;margin-bottom:4px}
+.about-ver{text-align:center;color:var(--text-dim);font-size:13px;margin-bottom:20px}
+.about-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
+.chip{padding:4px 10px;border-radius:20px;border:1px solid var(--border);font-size:11px;color:var(--text-dim)}
+.heart{display:inline-block;animation:hb .8s infinite}
+@keyframes hb{0%,100%{transform:scale(1)}50%{transform:scale(1.3)}}
 
-/* ── About modal ── */
-.about-modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:32px 28px 28px;width:100%;max-width:330px;text-align:center;position:relative}
-.about-icon{width:58px;height:58px;background:var(--gold-glow);border:1px solid var(--gold-dim);border-radius:16px;display:flex;align-items:center;justify-content:center;margin:0 auto 14px;font-size:1.9rem}
-.about-name{font-size:1.1rem;font-weight:600;color:var(--text);margin-bottom:5px}
-.about-ver{font-size:.75rem;font-family:var(--font-mono);color:var(--gold);background:var(--gold-glow);border:1px solid var(--gold-dim);border-radius:20px;padding:2px 10px;display:inline-block;margin-bottom:16px}
-.about-desc{font-size:.82rem;color:var(--text2);line-height:1.65;margin-bottom:20px}
-.about-div{height:1px;background:var(--border);margin:16px 0}
-.about-credit{font-size:.82rem;color:var(--text2);display:flex;align-items:center;justify-content:center;gap:5px;flex-wrap:wrap}
-.heart{color:#e84040;animation:hb 1.6s ease-in-out infinite;display:inline-block}
-@keyframes hb{0%,100%{transform:scale(1)}14%{transform:scale(1.28)}28%{transform:scale(1)}42%{transform:scale(1.18)}56%{transform:scale(1)}}
-.about-chips{display:flex;gap:6px;justify-content:center;margin-top:14px;flex-wrap:wrap}
-.chip{font-size:.66rem;color:var(--text3);background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:3px 9px;font-family:var(--font-mono)}
+/* ── Dev panel ── */
+.dev-section{margin-bottom:14px}
+.dev-section-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--text-dim);margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+.dev-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px}
+.dev-row label{font-size:12px;color:var(--text-dim);flex:1}
+.dev-row input{width:80px;padding:4px 8px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:12px;text-align:right}
+.dev-row input:focus{outline:none;border-color:var(--gold)}
+.dev-unlocked{border-color:var(--gold)!important;color:var(--gold)!important}
 
-/* ── Toasts ── */
-.toast-wrap{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:8px;z-index:400;pointer-events:none}
-.toast{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:10px 16px;font-size:.82rem;color:var(--text);opacity:0;transform:translateY(8px);transition:all .25s ease;pointer-events:auto;max-width:280px;font-family:var(--font-sans)}
-.toast.show{opacity:1;transform:none}
-.toast.ok{border-color:rgba(80,190,100,.4);background:rgba(80,190,100,.08)}
-.toast.err{border-color:rgba(220,70,70,.4);background:rgba(220,70,70,.08);color:#e07070}
-.toast.dev{border-color:rgba(220,100,50,.4);background:rgba(220,100,50,.08);color:#dc8050}
+/* ── USB ── */
+#usb-status{font-size:12px;color:var(--text-dim);margin-top:6px}
 
-/* ── Responsive ── */
-@media(max-width:600px){
-  .topbar{padding:0 12px;gap:6px}
-  .badge:not(:last-of-type):not(.gold){display:none}
-  .layout{padding:10px;gap:10px}
-  .card{padding:12px}
-  .dev-field{grid-template-columns:1fr 100px}
-  .theme-grid{grid-template-columns:repeat(3,1fr)}
-}
+/* ── LED Grid ── */
+.led-grid-wrap{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;padding:4px;background:var(--surface2);border-radius:var(--r-md)}
+.led-cell{aspect-ratio:1;border-radius:3px;background:#111;transition:background .1s;position:relative}
+.led-cell.lit{box-shadow:0 0 6px 1px currentColor}
+
+/* ── Disco ── */
+.disco-hint{font-size:11px;color:var(--text-dim);text-align:center;margin-top:8px;cursor:pointer;opacity:.4;transition:.2s}
+.disco-hint:hover{opacity:1;color:var(--gold)}
+@keyframes disco-flash{0%{filter:hue-rotate(0deg) brightness(1.5)}100%{filter:hue-rotate(360deg) brightness(1.5)}}
+.disco-active canvas{animation:disco-flash .3s linear infinite}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
 </style>
 </head>
 <body>
 
-<!-- ═══ MODALS ═══ -->
-
-<div class="overlay" id="ov-promo">
-  <div class="promo-modal">
-    <button class="modal-close" onclick="closeOv('ov-promo')">✕</button>
-    <h3>Promote pawn to…</h3>
-    <div class="promo-pieces">
-      <div class="promo-piece" onclick="submitPromo('q')">♛<span>Queen</span></div>
-      <div class="promo-piece" onclick="submitPromo('r')">♜<span>Rook</span></div>
-      <div class="promo-piece" onclick="submitPromo('b')">♝<span>Bishop</span></div>
-      <div class="promo-piece" onclick="submitPromo('n')">♞<span>Knight</span></div>
-    </div>
+<!-- Topbar -->
+<div class="topbar">
+  <div class="topbar-left">
+    <span class="logo">♟ Chess Board</span>
+    <div class="conn-dot" id="conn-dot"></div>
+  </div>
+  <div class="topbar-right">
+    <button class="icon-btn" onclick="toggleTheme()">🌓</button>
+    <button class="icon-btn" id="dev-btn" onclick="openDev()">🔒 Dev</button>
+    <button class="icon-btn" onclick="document.getElementById('ov-about').classList.add('show')">v4.0</button>
   </div>
 </div>
 
+<!-- Main layout -->
+<div class="main">
+
+  <!-- Board column -->
+  <div>
+    <div class="board-wrap">
+      <div class="board-header">
+        <div class="turn-badge" id="turn-badge">Waiting...</div>
+        <div style="font-size:12px;color:var(--text-dim)" id="mode-label">—</div>
+      </div>
+
+      <!-- Setup overlay -->
+      <div class="board-container" id="board-container">
+        <div class="setup-panel" id="setup-panel">
+          <div class="setup-title" id="setup-title">Select Game Mode</div>
+          <div class="setup-sub" id="setup-sub"></div>
+          <div class="setup-btns" id="setup-btns"></div>
+          <div id="setup-slider-wrap" style="display:none;width:100%;align-items:center;flex-direction:column;gap:8px">
+            <div class="setup-slider-val" id="setup-slider-val">—</div>
+            <input type="range" class="setup-slider" id="setup-slider" min="1" max="20" value="10">
+            <button class="setup-btn" onclick="confirmSlider()">Confirm</button>
+          </div>
+        </div>
+        <canvas id="board" width="480" height="480"></canvas>
+      </div>
+
+      <div class="board-footer">
+        <button class="ctrl-btn" onclick="socket.emit('undo')" id="undo-btn">↩ Undo</button>
+        <button class="ctrl-btn" onclick="socket.emit('hint')" id="hint-btn">💡 Hint</button>
+        <button class="ctrl-btn primary full" onclick="socket.emit('new_game')" id="new-game-btn">New Game</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+
+    <!-- Status -->
+    <div class="card">
+      <div class="card-title">Status</div>
+      <div class="status-text" id="status-text">Connecting...</div>
+      <div class="eval-bar-wrap"><div class="eval-bar" id="eval-bar" style="width:50%"></div></div>
+    </div>
+
+    <!-- Controls -->
+    <div class="card">
+      <div class="card-title">Controls</div>
+      <div class="ctrl-grid">
+        <button class="ctrl-btn" id="usb-btn" onclick="socket.emit('save_usb')" disabled>💾 Save USB</button>
+        <a href="/api/pgn/download"><button class="ctrl-btn">📥 PGN</button></a>
+        <div class="toggle-row full" style="grid-column:1/-1">
+          <span class="toggle-label" id="voice-label">Announcements off</span>
+          <label class="switch">
+            <input type="checkbox" id="voice-toggle" onchange="socket.emit('toggle_voice')">
+            <span class="slider-sw"></span>
+          </label>
+        </div>
+      </div>
+      <div id="usb-status" style="margin-top:8px;font-size:12px;color:var(--text-dim)">No USB drive detected</div>
+    </div>
+
+    <!-- Move history -->
+    <div class="card">
+      <div class="card-title">Move History</div>
+      <div class="history-list" id="history-list"></div>
+    </div>
+
+    <!-- Theme -->
+    <div class="card">
+      <div class="card-title">Board Theme</div>
+      <div class="theme-pills">
+        <div class="theme-pill" data-t="classic" onclick="setTheme('classic')">Classic</div>
+        <div class="theme-pill" data-t="ocean" onclick="setTheme('ocean')">Ocean</div>
+        <div class="theme-pill" data-t="forest" onclick="setTheme('forest')">Forest</div>
+        <div class="theme-pill" data-t="night" onclick="setTheme('night')">Night</div>
+        <div class="theme-pill" data-t="custom" onclick="document.getElementById('ov-theme').classList.add('show')">Custom…</div>
+      </div>
+    </div>
+
+    <!-- LED Grid -->
+    <div class="card">
+      <div class="card-title">Live Board LEDs</div>
+      <div class="led-grid-wrap" id="led-grid"></div>
+    </div>
+
+    <!-- Easter egg hint -->
+    <div class="disco-hint" onclick="triggerDisco()" title="🕺">✨ tap here for a surprise</div>
+
+  </div>
+</div>
+
+<!-- ══ OVERLAYS ══ -->
+
+<!-- PIN -->
 <div class="overlay" id="ov-pin">
   <div class="pin-modal">
-    <h3>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-      Developer access
-    </h3>
-    <p class="pin-sub">Enter your 4-digit PIN</p>
+    <div class="pin-title">🔒 Dev Access</div>
     <div class="pin-dots">
       <div class="pd" id="pd0"></div><div class="pd" id="pd1"></div>
       <div class="pd" id="pd2"></div><div class="pd" id="pd3"></div>
     </div>
     <div class="pin-numpad">
-      <div class="pin-key" onclick="pk('1')">1</div>
-      <div class="pin-key" onclick="pk('2')">2</div>
-      <div class="pin-key" onclick="pk('3')">3</div>
-      <div class="pin-key" onclick="pk('4')">4</div>
-      <div class="pin-key" onclick="pk('5')">5</div>
-      <div class="pin-key" onclick="pk('6')">6</div>
-      <div class="pin-key" onclick="pk('7')">7</div>
-      <div class="pin-key" onclick="pk('8')">8</div>
-      <div class="pin-key" onclick="pk('9')">9</div>
-      <div class="pin-key del" onclick="pdel()">⌫</div>
-      <div class="pin-key zero" onclick="pk('0')">0</div>
-      <div class="pin-key del" onclick="closeOv('ov-pin')">✕</div>
+      <button class="pin-key" onclick="pk('1')">1</button>
+      <button class="pin-key" onclick="pk('2')">2</button>
+      <button class="pin-key" onclick="pk('3')">3</button>
+      <button class="pin-key" onclick="pk('4')">4</button>
+      <button class="pin-key" onclick="pk('5')">5</button>
+      <button class="pin-key" onclick="pk('6')">6</button>
+      <button class="pin-key" onclick="pk('7')">7</button>
+      <button class="pin-key" onclick="pk('8')">8</button>
+      <button class="pin-key" onclick="pk('9')">9</button>
+      <button class="pin-key" onclick="closeOv('ov-pin')" style="font-size:14px">✕</button>
+      <button class="pin-key" onclick="pk('0')">0</button>
+      <button class="pin-key" onclick="pdel()">⌫</button>
     </div>
     <div class="pin-err" id="pin-err"></div>
   </div>
 </div>
 
+<!-- Dev panel -->
 <div class="overlay" id="ov-dev">
-  <div class="dev-modal">
+  <div class="modal" style="max-width:500px">
     <button class="modal-close" onclick="closeOv('ov-dev')">✕</button>
-    <div class="dev-head">
-      <h2>
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-        Dev settings
-        <span class="dev-badge">session only</span>
-      </h2>
+    <h2>⚙️ Developer Settings</h2>
+
+    <div class="dev-section">
+      <div class="dev-section-title">AI Engine</div>
+      <div class="dev-row"><label>Default difficulty</label><input type="number" id="d-difficulty_default" min="1" max="20"></div>
+      <div class="dev-row"><label>Min difficulty</label><input type="number" id="d-difficulty_min" min="1" max="20"></div>
+      <div class="dev-row"><label>Max difficulty</label><input type="number" id="d-difficulty_max" min="1" max="20"></div>
+      <div class="dev-row"><label>Move time default (ms)</label><input type="number" id="d-movetime_default_ms" min="500"></div>
+      <div class="dev-row"><label>Move time min (ms)</label><input type="number" id="d-movetime_min_ms" min="500"></div>
+      <div class="dev-row"><label>Move time max (ms)</label><input type="number" id="d-movetime_max_ms" min="500"></div>
+      <div class="dev-row"><label>Stockfish path</label><input type="text" id="d-stockfish_path" style="width:160px"></div>
     </div>
-    <div class="dev-body">
-      <div class="dev-note"><strong>⚠ Session-only.</strong> Changes apply immediately but are <strong>not</strong> written to .env — a restart reverts them. Edit config.py or .env for permanent changes.</div>
 
-      <div class="dev-section">
-        <div class="dev-sec-title">Stockfish / AI</div>
-        <div class="dev-field"><div class="dev-lbl">Default difficulty<small>1–20</small></div><input class="dev-input" id="dv-difficulty_default" type="number" min="1" max="20" oninput="markC(this)"></div>
-        <div class="dev-field"><div class="dev-lbl">Min difficulty<small>selection lower bound</small></div><input class="dev-input" id="dv-difficulty_min" type="number" min="1" max="20" oninput="markC(this)"></div>
-        <div class="dev-field"><div class="dev-lbl">Max difficulty<small>selection upper bound</small></div><input class="dev-input" id="dv-difficulty_max" type="number" min="1" max="20" oninput="markC(this)"></div>
-        <div class="dev-field"><div class="dev-lbl">Default move time<small>ms</small></div><input class="dev-input" id="dv-movetime_default_ms" type="number" min="500" oninput="markC(this)"></div>
-        <div class="dev-field"><div class="dev-lbl">Min move time<small>ms</small></div><input class="dev-input" id="dv-movetime_min_ms" type="number" min="500" oninput="markC(this)"></div>
-        <div class="dev-field"><div class="dev-lbl">Max move time<small>ms</small></div><input class="dev-input" id="dv-movetime_max_ms" type="number" min="500" oninput="markC(this)"></div>
-        <div class="dev-field"><div class="dev-lbl">Stockfish path<small>full binary path</small></div><input class="dev-input" id="dv-stockfish_path" type="text" style="text-align:left;font-size:.70rem" oninput="markC(this)"></div>
-      </div>
-
-      <div class="dev-section">
-        <div class="dev-sec-title">LED hardware</div>
-        <div class="dev-field"><div class="dev-lbl">Board brightness cap<small>0–255 (76 ≈ 30%)</small></div><input class="dev-input" id="dv-chess_led_brightness" type="number" min="0" max="255" oninput="markC(this)"></div>
-        <div class="dev-field"><div class="dev-lbl">Startup sweep delay<small>seconds per LED</small></div><input class="dev-input" id="dv-startup_led_delay_s" type="number" min="0" step="0.005" oninput="markC(this)"></div>
-      </div>
-
-      <div class="dev-section">
-        <div class="dev-sec-title">Input &amp; UX timings</div>
-        <div class="dev-field"><div class="dev-lbl">Button debounce<small>seconds</small></div><input class="dev-input" id="dv-button_debounce_s" type="number" min="0.05" step="0.01" oninput="markC(this)"></div>
-        <div class="dev-field"><div class="dev-lbl">Hint auto-dismiss<small>seconds</small></div><input class="dev-input" id="dv-hint_dismiss_s" type="number" min="1" step="0.5" oninput="markC(this)"></div>
-        <div class="dev-field"><div class="dev-lbl">Undo stack depth<small>max half-moves</small></div><input class="dev-input" id="dv-undo_max_half_moves" type="number" min="2" max="40" oninput="markC(this)"></div>
-      </div>
-
-      <div class="dev-section">
-        <div class="dev-sec-title">Voice / TTS</div>
-        <div class="dev-field"><div class="dev-lbl">Speech rate<small>words per minute</small></div><input class="dev-input" id="dv-tts_rate" type="number" min="80" max="300" oninput="markC(this)"></div>
-        <div class="dev-field"><div class="dev-lbl">Volume<small>0.0 – 1.0</small></div><input class="dev-input" id="dv-tts_volume" type="number" min="0" max="1" step="0.05" oninput="markC(this)"></div>
-      </div>
-
-      <div class="dev-section">
-        <div class="dev-sec-title">Storage &amp; network</div>
-        <div class="dev-field"><div class="dev-lbl">PGN folder on USB<small>subfolder name</small></div><input class="dev-input" id="dv-pgn_subdir" type="text" style="text-align:left" oninput="markC(this)"></div>
-        <div class="dev-field"><div class="dev-lbl">Dashboard port<small>restart required</small></div><input class="dev-input" id="dv-web_port" type="number" min="1024" max="65535" oninput="markC(this)"></div>
-      </div>
+    <div class="dev-section">
+      <div class="dev-section-title">Hardware</div>
+      <div class="dev-row"><label>LED brightness (0-255)</label><input type="number" id="d-chess_led_brightness" min="0" max="255"></div>
+      <div class="dev-row"><label>Startup LED delay (s)</label><input type="number" id="d-startup_led_delay_s" step="0.001"></div>
+      <div class="dev-row"><label>Button debounce (s)</label><input type="number" id="d-button_debounce_s" step="0.01"></div>
     </div>
-    <div class="dev-foot">
-      <button class="btn sm" onclick="closeOv('ov-dev')">Cancel</button>
-      <button class="btn sm primary" onclick="saveDevSettings()">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-        Apply to session
-      </button>
+
+    <div class="dev-section">
+      <div class="dev-section-title">Gameplay</div>
+      <div class="dev-row"><label>Hint dismiss (s)</label><input type="number" id="d-hint_dismiss_s" step="0.5"></div>
+      <div class="dev-row"><label>Max undo half-moves</label><input type="number" id="d-undo_max_half_moves" min="1"></div>
     </div>
+
+    <div class="dev-section">
+      <div class="dev-section-title">Voice</div>
+      <div class="dev-row"><label>TTS rate (wpm)</label><input type="number" id="d-tts_rate" min="80" max="300"></div>
+      <div class="dev-row"><label>TTS volume (0-1)</label><input type="number" id="d-tts_volume" step="0.1" min="0" max="1"></div>
+    </div>
+
+    <div class="dev-section">
+      <div class="dev-section-title">Server</div>
+      <div class="dev-row"><label>Web port</label><input type="number" id="d-web_port"></div>
+      <div class="dev-row"><label>PGN subdirectory</label><input type="text" id="d-pgn_subdir" style="width:120px"></div>
+      <div class="dev-row"><label>Dev PIN</label><input type="text" id="d-dev_pin" maxlength="8" style="width:80px"></div>
+    </div>
+
+    <button class="ctrl-btn primary full" style="margin-top:4px" onclick="saveDevSettings()">Save Settings</button>
+    <div id="dev-save-msg" style="font-size:12px;color:var(--green);margin-top:8px;min-height:16px"></div>
   </div>
 </div>
 
-<div class="overlay" id="ov-about">
-  <div class="about-modal">
+<!-- Custom theme -->
+<div class="overlay" id="ov-theme">
+  <div class="modal">
+    <button class="modal-close" onclick="closeOv('ov-theme')">✕</button>
+    <h2>🎨 Custom Theme</h2>
+    <div class="colour-row">
+      <div class="colour-item"><input type="color" id="c-light" value="#f0d9b5"><span>Light sq</span></div>
+      <div class="colour-item"><input type="color" id="c-dark" value="#b58863"><span>Dark sq</span></div>
+      <div class="colour-item"><input type="color" id="c-sel" value="#aef"><span>Selected</span></div>
+      <div class="colour-item"><input type="color" id="c-move" value="#e8e800"><span>Last move</span></div>
+      <div class="colour-item"><input type="color" id="c-hint" value="#58d"><span>Hint</span></div>
+      <div class="colour-item"><input type="color" id="c-legal" value="#40a020"><span>Legal</span></div>
+    </div>
+    <button class="ctrl-btn primary full" style="margin-top:16px" onclick="applyCustomTheme()">Apply Theme</button>
+  </div>
+</div>
+
+<!-- About -->
+<div class="overlay" id="ov-about" onclick="closeOv('ov-about')">
+  <div class="modal" style="text-align:center" onclick="event.stopPropagation()">
     <button class="modal-close" onclick="closeOv('ov-about')">✕</button>
-    <div class="about-icon">♟</div>
-    <div class="about-name">Smart Chess Board</div>
-    <div class="about-ver">v4.0 — Jetson Orin Nano</div>
-    <p class="about-desc">A fully self-contained AI chess board with Stockfish engine, Lichess online play, local two-player mode, voice announcements, and real-time WS2812b LED feedback.</p>
-    <div class="about-div"></div>
-    <div class="about-credit">
-      Made with <span class="heart">❤️</span> by <strong>Richard P</strong>
-    </div>
+    <div class="about-logo">♟</div>
+    <div style="font-size:20px;font-weight:700;color:var(--gold);margin-bottom:4px">Smart Chess Board</div>
+    <div class="about-ver">v4.0 · Jetson Orin Nano</div>
     <div class="about-chips">
-      <span class="chip">Python 3.12</span>
+      <span class="chip">Python 3</span>
+      <span class="chip">Flask + SocketIO</span>
+      <span class="chip">python-chess</span>
       <span class="chip">Stockfish</span>
-      <span class="chip">Flask · SocketIO</span>
-      <span class="chip">WS2812b</span>
-      <span class="chip">espeak-ng</span>
-      <span class="chip">Jetson Orin</span>
+      <span class="chip">Jetson.GPIO</span>
+      <span class="chip">WS2812b LEDs</span>
+      <span class="chip">SSD1306 OLED</span>
     </div>
+    <div style="font-size:14px;color:var(--text-dim)">Made with <span class="heart">❤️</span> by Richard P</div>
+    <div style="font-size:12px;color:var(--text-dim);margin-top:12px;opacity:.5;cursor:pointer" onclick="triggerDisco()">🕺 psst...</div>
   </div>
 </div>
-
-<div class="toast-wrap" id="toast-wrap"></div>
-
-<!-- ═══ TOPBAR ═══ -->
-<header class="topbar">
-  <div class="logo">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M9 2h6l-1 4H10L9 2z"/><path d="M10 6c0 2-2 3-2 5h8c0-2-2-3-2-5"/>
-      <rect x="8" y="11" width="8" height="2" rx="1"/><path d="M7 13v3l-1 3h10l-1-3v-3"/>
-    </svg>
-    Smart Chess
-  </div>
-  <div class="spacer"></div>
-  <div style="display:flex;align-items:center;gap:8px">
-    <span class="badge" id="badge-mode">—</span>
-    <span class="badge" id="badge-turn">—</span>
-    <div class="conn-dot" id="conn-dot"></div>
-  </div>
-  <button class="tbtn" onclick="openAbout()" title="About">
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-    <span style="font-size:.72rem">v4.0</span>
-  </button>
-  <button class="tbtn" id="dev-btn" onclick="openDev()" title="Developer settings">
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-    Dev
-  </button>
-  <button class="tbtn" onclick="toggleTheme()" title="Toggle light/dark">
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
-      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-      <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
-      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-    </svg>
-  </button>
-</header>
-
-<!-- ═══ LAYOUT ═══ -->
-<main class="layout">
-
-  <div style="display:flex;flex-direction:column;gap:12px">
-    <div class="card">
-      <div class="card-title">Board</div>
-      <div id="board-wrap"><canvas id="board-canvas"></canvas></div>
-      <div class="eval-wrap">
-        <div class="eval-track"><div class="eval-w" id="eval-w" style="width:50%"></div></div>
-        <div class="eval-labels"><span id="evl-w">0.00</span><span style="color:var(--text3)">evaluation</span><span id="evl-b">0.00</span></div>
-      </div>
-      <div class="turn-banner white" id="turn-banner"><div class="turn-dot"></div><span id="turn-txt">White's turn</span></div>
-      <div class="status-line" id="status-line">Waiting for board…</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Controls</div>
-      <div class="btn-row">
-        <button class="btn primary" onclick="act('new_game')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4"/></svg>New game</button>
-        <button class="btn" onclick="act('hint')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Hint</button>
-        <button class="btn" onclick="act('undo')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>Undo</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="right-col">
-    <div class="card">
-      <div class="card-title">Session</div>
-      <div class="stats-grid">
-        <div class="stat-cell"><div class="stat-label">Mode</div><div class="stat-value" id="s-mode">—</div></div>
-        <div class="stat-cell"><div class="stat-label">Difficulty</div><div class="stat-value" id="s-diff">—</div></div>
-        <div class="stat-cell"><div class="stat-label">Moves</div><div class="stat-value" id="s-moves">0</div></div>
-        <div class="stat-cell"><div class="stat-label">Turn</div><div class="stat-value" id="s-turn">—</div></div>
-      </div>
-    </div>
-    <div class="card">
-      <div class="card-title">Move history</div>
-      <div class="move-history" id="move-list"><span class="move-empty">No moves yet</span></div>
-    </div>
-    <div class="card">
-      <div class="card-title">LED theme</div>
-      <div class="theme-grid" id="theme-grid"></div>
-      <div id="custom-panel" style="display:none">
-        <div class="divider"></div>
-        <div class="custom-theme-grid">
-          <div class="color-row"><input type="color" id="c-light" value="#ffffff" oninput="liveTheme()"> Light sq.</div>
-          <div class="color-row"><input type="color" id="c-dark"  value="#000000" oninput="liveTheme()"> Dark sq.</div>
-          <div class="color-row"><input type="color" id="c-move"  value="#00ff00" oninput="liveTheme()"> Move</div>
-          <div class="color-row"><input type="color" id="c-hint"  value="#00ffff" oninput="liveTheme()"> Hint</div>
-        </div>
-        <button class="btn btn-full" style="margin-top:8px" onclick="applyCustom()">Apply to LEDs</button>
-      </div>
-    </div>
-    <div class="card">
-      <div class="card-title">Save &amp; export</div>
-      <div class="btn-row">
-        <button class="btn" id="usb-btn" onclick="act('save_usb')" disabled>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-          Save to USB
-        </button>
-        <a href="/api/pgn/download" style="text-decoration:none"><button class="btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>PGN</button></a>
-      </div>
-      <div style="font-size:.72rem;color:var(--text3);margin-top:6px" id="usb-status">No USB drive detected</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Voice</div>
-      <div class="toggle-wrap">
-        <label class="toggle"><input type="checkbox" id="voice-toggle" onchange="act('toggle_voice')"><div class="toggle-track"></div><div class="toggle-thumb"></div></label>
-        <span class="toggle-label" id="voice-label">Announcements off</span>
-      </div>
-      <div style="font-size:.70rem;color:var(--text3);margin-top:6px">Plug in a USB speaker to enable.</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Jetson system</div>
-      <div class="sys-row"><span class="sys-key">CPU temp</span><span class="sys-val" id="sys-temp">—</span></div>
-      <div class="sys-row"><span class="sys-key">CPU load</span><span class="sys-val" id="sys-cpu">—</span></div>
-      <div class="sys-row"><span class="sys-key">RAM used</span><span class="sys-val" id="sys-ram">—</span></div>
-      <div class="divider"></div>
-      <button class="btn btn-full sm" onclick="otaUpdate()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4"/></svg>Check for updates</button>
-      <div class="ota-out" id="ota-out"></div>
-    </div>
-  </div>
-</main>
 
 <script>
-// ═══ THEME ═══
-const PREF = matchMedia('(prefers-color-scheme:dark)').matches;
-let CUR_THEME = localStorage.getItem('chess-theme') || (PREF?'dark':'light');
-document.documentElement.setAttribute('data-theme', CUR_THEME);
-function toggleTheme(){
-  CUR_THEME = CUR_THEME==='dark'?'light':'dark';
-  document.documentElement.setAttribute('data-theme',CUR_THEME);
-  localStorage.setItem('chess-theme',CUR_THEME);
-  drawBoard();
-}
+const socket = io();
+let currentFen  = null;
+let selectedSq  = null;
+let legalMoveSqs = [];
+let lastMove    = null;
+let hintMove    = null;
+let currentTheme= 'classic';
+let gameActive  = false;
+let setupPhase  = 'idle';
+let webPlayer   = null;
+let hintCount   = 0;
+let discoActive = false;
 
-// ═══ BOARD CANVAS ═══
-const CV = document.getElementById('board-canvas');
-const CX = CV.getContext('2d');
-let FEN='rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
-let LEGAL=[],SEL=null,DRAG=null,LAST_SQS=[],HINT_SQS=[],PROMO_UCI=null;
-
-const PC={'K':'♔','Q':'♕','R':'♖','B':'♗','N':'♘','P':'♙','k':'♚','q':'♛','r':'♜','b':'♝','n':'♞','p':'♟'};
-
-function parseFen(fen){
-  const b=new Array(64).fill(null);
-  fen.split(' ')[0].split('/').forEach((row,r)=>{let f=0;for(const c of row){if(c>='1'&&c<='8')f+=+c;else{b[r*8+f]=c;f++;}}});
-  return b;
-}
-function s2a(sq){'abcdefgh'[sq%8]+(8-Math.floor(sq/8));return 'abcdefgh'[sq%8]+(8-Math.floor(sq/8));}
-function a2s(a){return(8-+a[1])*8+'abcdefgh'.indexOf(a[0]);}
-
-function getC(){
-  const dk=document.documentElement.getAttribute('data-theme')==='dark';
-  return{
-    l:dk?'#b0956e':'#f0d9b5', d:dk?'#6e4e2e':'#b58863',
-    sel:'rgba(201,168,76,.72)', dot:'rgba(201,168,76,.32)', cap:'rgba(201,168,76,.58)',
-    last:dk?'rgba(90,150,70,.50)':'rgba(120,190,90,.45)',
-    hint:dk?'rgba(50,140,210,.55)':'rgba(60,160,220,.50)',
-    crd:dk?'rgba(255,255,255,.22)':'rgba(0,0,0,.22)'
-  };
-}
-
-function drawBoard(){
-  const DPR=window.devicePixelRatio||1;
-  const SZ=CV.parentElement.clientWidth;
-  CV.width=SZ*DPR; CV.height=SZ*DPR;
-  CV.style.width=SZ+'px'; CV.style.height=SZ+'px';
-  CX.scale(DPR,DPR);
-  const SQ=SZ/8, C=getC(), BD=parseFen(FEN);
-  const LT=new Set(), LC=new Set();
-  LEGAL.forEach(u=>{const t=a2s(u.slice(2,4));LT.add(t);if(BD[t])LC.add(t);});
-  for(let i=0;i<64;i++){
-    const r=Math.floor(i/8),f=i%8,x=f*SQ,y=r*SQ,il=(r+f)%2===0;
-    CX.fillStyle=il?C.l:C.d; CX.fillRect(x,y,SQ,SQ);
-    if(LAST_SQS.includes(i)){CX.fillStyle=C.last;CX.fillRect(x,y,SQ,SQ);}
-    if(HINT_SQS.includes(i)){CX.fillStyle=C.hint;CX.fillRect(x,y,SQ,SQ);}
-    if(SEL===i){CX.fillStyle=C.sel;CX.fillRect(x,y,SQ,SQ);}
-    if(LT.has(i)){
-      if(LC.has(i)){CX.strokeStyle=C.cap;CX.lineWidth=SQ*.08;CX.beginPath();CX.arc(x+SQ/2,y+SQ/2,SQ*.45,0,Math.PI*2);CX.stroke();}
-      else{CX.fillStyle=C.dot;CX.beginPath();CX.arc(x+SQ/2,y+SQ/2,SQ*.16,0,Math.PI*2);CX.fill();}
-    }
-    CX.font=`${Math.round(SQ*.19)}px Google Sans Mono,monospace`;
-    CX.fillStyle=C.crd; CX.textBaseline='top';
-    if(f===0){CX.textAlign='left';CX.fillText(8-r,x+3,y+2);}
-    if(r===7){CX.textAlign='right';CX.fillText('abcdefgh'[f],x+SQ-3,y+SQ-Math.round(SQ*.22));}
-    const pc=BD[i];
-    if(pc&&!(DRAG&&DRAG.sq===i)) drawPc(pc,x+SQ/2,y+SQ/2,SQ);
-  }
-  if(DRAG) drawPc(DRAG.pc,DRAG.x,DRAG.y,SQ*1.18);
-}
-
-function drawPc(p,cx,cy,sz){
-  const w=p===p.toUpperCase();
-  CX.font=`${Math.round(sz*.72)}px serif`;
-  CX.textAlign='center'; CX.textBaseline='middle';
-  CX.shadowColor=w?'rgba(0,0,0,.6)':'rgba(0,0,0,.4)'; CX.shadowBlur=sz*.06;
-  CX.fillStyle=w?'#fffaf2':'#1a1008';
-  CX.fillText(PC[p]||p,cx,cy+sz*.02); CX.shadowBlur=0;
-}
-
-function getSq(ex,ey){
-  const R=CV.getBoundingClientRect(),SQ=R.width/8;
-  const f=Math.floor((ex-R.left)/SQ),r=Math.floor((ey-R.top)/SQ);
-  return(f<0||f>7||r<0||r>7)?null:r*8+f;
-}
-
-function fetchLegal(sq){socket.emit('get_legal_moves',{fen:FEN,sq:s2a(sq)});}
-
-function clickSq(sq){
-  if(sq===null)return;
-  const bd=parseFen(FEN),pc=bd[sq];
-  if(SEL===null){if(pc){SEL=sq;LEGAL=[];fetchLegal(sq);drawBoard();}}
-  else if(SEL===sq){SEL=null;LEGAL=[];drawBoard();}
-  else{tryMove(SEL,sq);}
-}
-
-function tryMove(from,to){
-  const bd=parseFen(FEN),mp=bd[from];
-  const uci=s2a(from)+s2a(to);
-  SEL=null;LEGAL=[];
-  if((mp==='P'&&Math.floor(to/8)===0)||(mp==='p'&&Math.floor(to/8)===7)){
-    PROMO_UCI=uci;document.getElementById('ov-promo').classList.add('show');
-  } else {socket.emit('move_input',{uci});drawBoard();}
-}
-
-function submitPromo(p){
-  closeOv('ov-promo');
-  if(PROMO_UCI)socket.emit('move_input',{uci:PROMO_UCI+p});
-  PROMO_UCI=null;
-}
-
-let PD=false,HD=false;
-CV.addEventListener('pointerdown',e=>{
-  e.preventDefault();
-  const sq=getSq(e.clientX,e.clientY);
-  if(sq===null)return;
-  const bd=parseFen(FEN);
-  PD=true;HD=false;
-  if(bd[sq]){
-    const R=CV.getBoundingClientRect();
-    DRAG={sq,pc:bd[sq],x:e.clientX-R.left,y:e.clientY-R.top};
-    SEL=sq;LEGAL=[];fetchLegal(sq);drawBoard();
-  }
-});
-CV.addEventListener('pointermove',e=>{
-  if(!PD||!DRAG)return;
-  const R=CV.getBoundingClientRect();
-  DRAG.x=e.clientX-R.left;DRAG.y=e.clientY-R.top;HD=true;drawBoard();
-});
-CV.addEventListener('pointerup',e=>{
-  if(!PD)return; PD=false;
-  const sq=getSq(e.clientX,e.clientY);
-  if(DRAG&&HD){
-    if(sq!==null&&sq!==DRAG.sq){const from=DRAG.sq;DRAG=null;tryMove(from,sq);}
-    else{DRAG=null;drawBoard();}
-  } else {DRAG=null;clickSq(sq);}
-});
-CV.addEventListener('touchstart',e=>e.preventDefault(),{passive:false});
+// ═══ THEMES ═══
+const THEMES = {
+  classic:{ light:'#f0d9b5', dark:'#b58863', sel:'#aaeeff', move:'#e8e800', hint:'#5588dd', legal:'#40a020' },
+  ocean:  { light:'#c9e8f0', dark:'#3a7fb5', sel:'#aaffdd', move:'#ffe040', hint:'#ff8040', legal:'#20c060' },
+  forest: { light:'#e8f0c0', dark:'#5a8040', sel:'#ffd0a0', move:'#ffff60', hint:'#60a0ff', legal:'#30d060' },
+  night:  { light:'#3a3f50', dark:'#1e2230', sel:'#8080ff', move:'#ffcc00', hint:'#ff6060', legal:'#40cc40' },
+};
+let customTheme = null;
+let activeTheme = THEMES.classic;
 
 // ═══ SOCKET ═══
-const socket=io();
-socket.on('connect',()=>{document.getElementById('conn-dot').classList.add('live');document.getElementById('status-line').textContent='Connected';});
-socket.on('disconnect',()=>{document.getElementById('conn-dot').classList.remove('live');document.getElementById('status-line').textContent='Disconnected — reconnecting…';});
-socket.on('legal_moves',d=>{LEGAL=d.moves||[];drawBoard();});
-socket.on('move_rejected',d=>{toast('Move rejected: '+(d.reason||'illegal'),'err');SEL=null;LEGAL=[];DRAG=null;drawBoard();});
-socket.on('move_accepted',()=>{SEL=null;LEGAL=[];});
+socket.on('connect',    ()=>{ document.getElementById('conn-dot').classList.add('on'); });
+socket.on('disconnect', ()=>{ document.getElementById('conn-dot').classList.remove('on'); });
 
-socket.on('state_update',d=>{
-  FEN=d.fen||FEN;
-  LAST_SQS=d.last_move&&d.last_move.length>=4?[a2s(d.last_move.slice(0,2)),a2s(d.last_move.slice(2,4))]:[];
-  HINT_SQS=d.hint_move&&d.hint_move.length>=4?[a2s(d.hint_move.slice(0,2)),a2s(d.hint_move.slice(2,4))]:[];
-  drawBoard();
-  // Turn banner
-  const bn=document.getElementById('turn-banner'),tt=document.getElementById('turn-txt');
-  bn.className='turn-banner';
-  if(d.thinking){bn.classList.add('thinking');tt.textContent='Engine thinking…';}
-  else if(d.whose_turn==='White'){bn.classList.add('white');tt.textContent="White's turn";}
-  else{bn.classList.add('black');tt.textContent="Black's turn";}
-  // Eval
-  const sc=Math.max(-500,Math.min(500,d.eval_score||0));
-  document.getElementById('eval-w').style.width=Math.round((sc+500)/1000*100)+'%';
-  document.getElementById('evl-w').textContent=sc>=0?'+'+(sc/100).toFixed(2):'0.00';
-  document.getElementById('evl-b').textContent=sc<0?(sc/100).toFixed(2):'0.00';
-  document.getElementById('status-line').textContent=d.status||'';
-  document.getElementById('s-mode').textContent=d.game_mode||'—';
-  document.getElementById('s-diff').textContent=d.difficulty||'—';
-  document.getElementById('s-moves').textContent=d.move_count||0;
-  document.getElementById('s-turn').textContent=d.whose_turn||'—';
-  document.getElementById('badge-mode').textContent=d.game_mode||'—';
-  document.getElementById('badge-turn').textContent=(d.whose_turn||'—')+"'s turn";
-  // Move list
-  const hist=d.move_history||[],pairs=[];
-  for(let i=0;i<hist.length;i+=2)pairs.push([Math.floor(i/2)+1,hist[i],hist[i+1]||'']);
-  const ml=document.getElementById('move-list');
-  ml.innerHTML=!pairs.length?'<span class="move-empty">No moves yet</span>':pairs.map((p,idx)=>
-    `<div class="move-row${idx===pairs.length-1?' latest':''}"><span class="move-num">${p[0]}.</span><span class="move-w">${p[1]}</span><span class="move-b">${p[2]}</span></div>`).join('');
-  if(pairs.length)ml.scrollTop=ml.scrollHeight;
-  // USB / voice
-  document.getElementById('usb-btn').disabled=!d.usb_available;
-  document.getElementById('usb-status').textContent=d.usb_available?'USB ready — click to save':'No USB drive detected';
-  document.getElementById('voice-toggle').checked=!!d.voice_enabled;
-  document.getElementById('voice-label').textContent=d.voice_enabled?'Announcements on':'Announcements off';
+socket.on('state_update', d => {
+  currentFen  = d.fen;
+  lastMove    = d.last_move  || null;
+  hintMove    = d.hint_move  || null;
+  gameActive  = d.game_active;
+  setupPhase  = d.setup_phase || 'idle';
+  webPlayer   = d.web_player || null;
+  discoActive = d.disco_active || false;
+
+  document.getElementById('turn-badge').textContent =
+    d.thinking ? '🤔 Thinking...' : `${d.whose_turn}'s turn`;
+  document.getElementById('mode-label').textContent = d.game_mode || '—';
+  document.getElementById('status-text').textContent = d.status || '';
+
+  const evalPct = Math.max(5, Math.min(95, 50 + (d.eval_score || 0) / 20));
+  document.getElementById('eval-bar').style.width = evalPct + '%';
+
+  document.getElementById('usb-btn').disabled = !d.usb_available;
+  document.getElementById('usb-status').textContent =
+    d.usb_available ? 'USB ready — click to save' : 'No USB drive detected';
+
+  document.getElementById('voice-toggle').checked = !!d.voice_enabled;
+  document.getElementById('voice-label').textContent =
+    d.voice_enabled ? 'Announcements on' : 'Announcements off';
+
   syncThemes(d.theme);
+  renderHistory(d.move_history || []);
+  drawBoard();
+  handleSetupPhase(d);
+
+  // Disco
+  document.getElementById('board-container').classList.toggle('disco-active', discoActive);
 });
 
-// ═══ PIN & DEV ═══
-const PIN_KEY='chess_dev_pin', DEF_PIN='1337';
-let pinBuf='',devUnlocked=false;
+socket.on('legal_moves', d => {
+  legalMoveSqs = d.moves.map(m => m.slice(2,4));
+  drawBoard();
+});
 
-function openDev(){devUnlocked?showDevPanel():(pinBuf='',updPinDots(),document.getElementById('pin-err').textContent='',document.getElementById('ov-pin').classList.add('show'));}
-function pk(d){if(pinBuf.length>=4)return;pinBuf+=d;updPinDots();if(pinBuf.length===4)checkPin();}
-function pdel(){pinBuf=pinBuf.slice(0,-1);updPinDots();document.getElementById('pin-err').textContent='';}
-function updPinDots(){for(let i=0;i<4;i++){const e=document.getElementById('pd'+i);e.className='pd'+(i<pinBuf.length?' filled':'');}}
-function checkPin(){
-  const stored=localStorage.getItem(PIN_KEY)||DEF_PIN;
-  if(pinBuf===stored){
-    devUnlocked=true;closeOv('ov-pin');showDevPanel();
-    const db=document.getElementById('dev-btn');db.classList.add('dev-unlocked');
-  } else {
-    for(let i=0;i<4;i++)document.getElementById('pd'+i).className='pd err';
-    document.getElementById('pin-err').textContent='Incorrect PIN';
-    setTimeout(()=>{pinBuf='';updPinDots();},800);
+socket.on('move_rejected', d => {
+  document.getElementById('status-text').textContent = '❌ ' + d.reason;
+});
+
+socket.on('dev_settings', d => {
+  Object.entries(d).forEach(([k,v]) => {
+    const el = document.getElementById('d-'+k);
+    if (el) el.value = v;
+  });
+});
+
+socket.on('dev_settings_saved', d => {
+  document.getElementById('dev-save-msg').textContent =
+    d.ok ? '✓ Saved (' + d.changed.length + ' changes)' : '✗ Error';
+  setTimeout(()=>document.getElementById('dev-save-msg').textContent='', 3000);
+});
+
+// ═══ SETUP PHASE HANDLER ═══
+function handleSetupPhase(d) {
+  const panel = document.getElementById('setup-panel');
+  const phase = d.setup_phase || 'idle';
+
+  if (phase === 'idle' || phase === 'ready') {
+    panel.classList.remove('show');
+    return;
+  }
+
+  panel.classList.add('show');
+  const title  = document.getElementById('setup-title');
+  const sub    = document.getElementById('setup-sub');
+  const btns   = document.getElementById('setup-btns');
+  const slWrap = document.getElementById('setup-slider-wrap');
+  const slider = document.getElementById('setup-slider');
+  const slVal  = document.getElementById('setup-slider-val');
+  btns.innerHTML = '';
+  slWrap.style.display = 'none';
+
+  if (phase === 'mode_select') {
+    title.textContent = 'Select Game Mode';
+    sub.textContent = 'Choose how you want to play';
+    [
+      ['stockfish',   '🤖 vs AI'],
+      ['lichess',     '🌐 Lichess Online'],
+      ['local',       '👥 Local 2 Player'],
+      ['web_vs_ai',   '💻 Web vs AI'],
+      ['web_local',   '💻 Web 2 Player'],
+    ].forEach(([mode, label]) => {
+      const b = document.createElement('button');
+      b.className = 'setup-btn';
+      b.textContent = label;
+      b.onclick = () => socket.emit('web_mode_select', {mode});
+      btns.appendChild(b);
+    });
+  } else if (phase === 'difficulty') {
+    title.textContent = 'Set AI Difficulty';
+    sub.textContent = 'Drag the slider (1 = easy, 20 = grandmaster)';
+    slWrap.style.display = 'flex';
+    slider.min = 1; slider.max = 20; slider.value = d.difficulty || 10;
+    slVal.textContent = slider.value;
+    slider.oninput = () => slVal.textContent = slider.value;
+  } else if (phase === 'time') {
+    title.textContent = 'Set Move Time';
+    sub.textContent = 'How long should the AI think?';
+    [[3000,'3s'],[5000,'5s'],[8000,'8s'],[12000,'12s'],[20000,'20s']].forEach(([ms, label]) => {
+      const b = document.createElement('button');
+      b.className = 'setup-btn';
+      b.textContent = label;
+      b.onclick = () => socket.emit('web_setup_answer', {value: ms});
+      btns.appendChild(b);
+    });
+  } else if (phase === 'colour') {
+    title.textContent = 'Choose Your Colour';
+    sub.textContent = '';
+    [['white','♔ White'],['black','♚ Black']].forEach(([c, label]) => {
+      const b = document.createElement('button');
+      b.className = 'setup-btn';
+      b.textContent = label;
+      b.onclick = () => socket.emit('web_setup_answer', {value: c});
+      btns.appendChild(b);
+    });
+  } else if (phase === 'web_colour') {
+    title.textContent = 'Web Player Colour';
+    sub.textContent = 'Which side do you control from the browser?';
+    [['White','♔ White'],['Black','♚ Black']].forEach(([c, label]) => {
+      const b = document.createElement('button');
+      b.className = 'setup-btn';
+      b.textContent = label;
+      b.onclick = () => socket.emit('web_setup_answer', {value: c});
+      btns.appendChild(b);
+    });
   }
 }
-function showDevPanel(){socket.emit('get_dev_settings');document.getElementById('ov-dev').classList.add('show');}
 
-socket.on('dev_settings',data=>{
-  Object.entries(data).forEach(([k,v])=>{const el=document.getElementById('dv-'+k);if(el){el.value=v;el.classList.remove('changed');}});
-});
-socket.on('dev_settings_saved',data=>{
-  if(data.ok){toast('Applied ('+data.changed.length+' changed)','dev');document.querySelectorAll('.dev-input.changed').forEach(e=>e.classList.remove('changed'));}
-});
-function markC(el){el.classList.add('changed');}
-function saveDevSettings(){
-  const payload={};
-  document.querySelectorAll('.dev-input').forEach(el=>{
-    const k=el.id.replace('dv-','');
-    payload[k]=el.type==='number'?parseFloat(el.value):el.value;
-  });
-  socket.emit('apply_dev_settings',payload);
+function confirmSlider() {
+  const v = parseInt(document.getElementById('setup-slider').value);
+  socket.emit('web_setup_answer', {value: v});
 }
 
-// ═══ ABOUT ═══
-function openAbout(){document.getElementById('ov-about').classList.add('show');}
+// ═══ BOARD DRAWING ═══
+const canvas = document.getElementById('board');
+const ctx    = canvas.getContext('2d');
+const SZ     = 60;
 
-// ═══ OVERLAY HELPERS ═══
-function closeOv(id){document.getElementById(id).classList.remove('show');}
-document.querySelectorAll('.overlay').forEach(el=>el.addEventListener('click',e=>{if(e.target===el)closeOv(el.id);}));
-document.addEventListener('keydown',e=>{if(e.key==='Escape')document.querySelectorAll('.overlay.show').forEach(el=>closeOv(el.id));});
-
-// ═══ LED THEMES ═══
-const THEMES={
-  classic:{label:'Classic',c:['#fff','#000','#0f0','#0ff']},
-  fire:   {label:'Fire',   c:['#ff8c00','#500a00','#ff0','#f50']},
-  ocean:  {label:'Ocean',  c:['#0050b4','#00143c','#0fc8','#64c8ff']},
-  forest: {label:'Forest', c:['#145014','#050505','#b4e664','#64c864']},
-  neon:   {label:'Neon',   c:['#7800c8','#000028','#00ff96','#f0c']},
-  custom: {label:'Custom', c:['#888','#333','#fc0','#0cf']},
+const PIECES = {
+  wK:'♔',wQ:'♕',wR:'♖',wB:'♗',wN:'♘',wP:'♙',
+  bK:'♚',bQ:'♛',bR:'♜',bB:'♝',bN:'♞',bP:'♟',
 };
-function buildThemes(){
-  const g=document.getElementById('theme-grid');g.innerHTML='';
-  Object.entries(THEMES).forEach(([k,t])=>{
-    const el=document.createElement('div');el.className='theme-sw';el.dataset.key=k;
-    el.style.background=`linear-gradient(135deg,${t.c[0]} 50%,${t.c[1]} 50%)`;
-    el.innerHTML=`<span>${t.label}</span>`;
-    el.addEventListener('click',()=>selTheme(k));g.appendChild(el);
+
+function sqToXY(sq) {
+  const f = sq.charCodeAt(0) - 97;
+  const r = parseInt(sq[1]) - 1;
+  return {x: f*SZ, y: (7-r)*SZ};
+}
+
+function xyToSq(x, y) {
+  const f = Math.floor(x/SZ);
+  const r = 7 - Math.floor(y/SZ);
+  if (f<0||f>7||r<0||r>7) return null;
+  return String.fromCharCode(97+f) + (r+1);
+}
+
+function parseFen(fen) {
+  const pieces = {};
+  const rows = fen.split(' ')[0].split('/');
+  for (let r=0; r<8; r++) {
+    let f = 0;
+    for (const ch of rows[r]) {
+      if ('12345678'.includes(ch)) { f += parseInt(ch); }
+      else {
+        const colour = ch === ch.toUpperCase() ? 'w' : 'b';
+        const type   = ch.toUpperCase();
+        pieces[String.fromCharCode(97+f) + (8-r)] = colour + type;
+        f++;
+      }
+    }
+  }
+  return pieces;
+}
+
+function drawBoard() {
+  if (!currentFen) return;
+  const pieces = parseFen(currentFen);
+  const t = activeTheme;
+
+  ctx.clearRect(0,0,480,480);
+
+  for (let r=0; r<8; r++) {
+    for (let f=0; f<8; f++) {
+      const sq  = String.fromCharCode(97+f) + (8-r);
+      const isLight = (f+r)%2===0;
+      let col = isLight ? t.light : t.dark;
+
+      if (selectedSq === sq) col = t.sel;
+      else if (lastMove && (lastMove.slice(0,2)===sq || lastMove.slice(2,4)===sq)) col = t.move;
+      else if (hintMove && (hintMove.slice(0,2)===sq || hintMove.slice(2,4)===sq)) col = t.hint;
+      else if (legalMoveSqs.includes(sq)) col = t.legal;
+
+      ctx.fillStyle = col;
+      ctx.fillRect(f*SZ, r*SZ, SZ, SZ);
+
+      if (pieces[sq]) {
+        ctx.font = `${SZ*0.7}px serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const isDark = pieces[sq][0]==='b';
+        ctx.fillStyle = isDark ? '#111' : '#fff';
+        ctx.strokeStyle = isDark ? '#fff' : '#111';
+        ctx.lineWidth = 2;
+        ctx.strokeText(PIECES[pieces[sq]], f*SZ+SZ/2, r*SZ+SZ/2);
+        ctx.fillText(PIECES[pieces[sq]],   f*SZ+SZ/2, r*SZ+SZ/2);
+      }
+
+      // Coords
+      if (f===0) {
+        ctx.fillStyle = isLight ? t.dark : t.light;
+        ctx.font = '10px Google Sans,sans-serif';
+        ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        ctx.fillText(8-r, 2, r*SZ+2);
+      }
+      if (r===7) {
+        ctx.fillStyle = isLight ? t.dark : t.light;
+        ctx.font = '10px Google Sans,sans-serif';
+        ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+        ctx.fillText(String.fromCharCode(97+f), (f+1)*SZ-2, 8*SZ-2);
+      }
+    }
+  }
+}
+
+canvas.addEventListener('click', e => {
+  if (!gameActive || setupPhase !== 'idle') return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = 480 / rect.width;
+  const scaleY = 480 / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top)  * scaleY;
+  const sq = xyToSq(x, y);
+  if (!sq) return;
+
+  if (selectedSq) {
+    const uci = selectedSq + sq;
+    selectedSq = null;
+    legalMoveSqs = [];
+    socket.emit('move_input', {uci});
+    drawBoard();
+  } else {
+    selectedSq = sq;
+    legalMoveSqs = [];
+    socket.emit('get_legal_moves', {fen: currentFen, sq});
+    drawBoard();
+  }
+});
+
+// ═══ MOVE HISTORY ═══
+function renderHistory(history) {
+  const el = document.getElementById('history-list');
+  el.innerHTML = '';
+  for (let i=0; i<history.length; i+=2) {
+    const num = document.createElement('span');
+    num.className = 'move-num'; num.textContent = (i/2+1)+'.';
+    const w = document.createElement('span');
+    w.className = 'move-w' + (i===history.length-1 ? ' last':'');
+    w.textContent = history[i];
+    const b = document.createElement('span');
+    b.className = 'move-b' + (i+1===history.length-1 ? ' last':'');
+    b.textContent = history[i+1] || '';
+    el.appendChild(num); el.appendChild(w); el.appendChild(b);
+  }
+  el.scrollTop = el.scrollHeight;
+}
+
+// ═══ THEMES ═══
+function setTheme(t) {
+  socket.emit('set_theme', {theme: t});
+}
+function syncThemes(t) {
+  currentTheme = t;
+  activeTheme  = t === 'custom' && customTheme ? customTheme : (THEMES[t] || THEMES.classic);
+  document.querySelectorAll('.theme-pill').forEach(p =>
+    p.classList.toggle('active', p.dataset.t === t));
+  drawBoard();
+}
+function applyCustomTheme() {
+  const ct = {
+    light: document.getElementById('c-light').value,
+    dark:  document.getElementById('c-dark').value,
+    sel:   document.getElementById('c-sel').value,
+    move:  document.getElementById('c-move').value,
+    hint:  document.getElementById('c-hint').value,
+    legal: document.getElementById('c-legal').value,
+  };
+  customTheme = ct;
+  socket.emit('set_custom_theme', ct);
+  closeOv('ov-theme');
+}
+
+// ═══ PIN & DEV ═══
+let pinBuf='', devUnlocked=false;
+
+function openDev() {
+  if (devUnlocked) { showDevPanel(); return; }
+  pinBuf=''; updPinDots();
+  document.getElementById('pin-err').textContent='';
+  document.getElementById('ov-pin').classList.add('show');
+}
+function pk(d) {
+  if (pinBuf.length>=4) return;
+  pinBuf+=d; updPinDots();
+  if (pinBuf.length===4) checkPin();
+}
+function pdel() { pinBuf=pinBuf.slice(0,-1); updPinDots(); document.getElementById('pin-err').textContent=''; }
+function updPinDots() {
+  for(let i=0;i<4;i++){
+    document.getElementById('pd'+i).className='pd'+(i<pinBuf.length?' filled':'');
+  }
+}
+function checkPin() {
+  // Fetch PIN from server via dev_settings
+  socket.emit('get_dev_settings');
+  // We check after we get the response
+  socket._pendingPinCheck = pinBuf;
+}
+
+socket.on('dev_settings', d => {
+  if (socket._pendingPinCheck !== undefined) {
+    const serverPin = String(d.dev_pin || '1337');
+    if (socket._pendingPinCheck === serverPin) {
+      devUnlocked=true; closeOv('ov-pin'); showDevPanel();
+      document.getElementById('dev-btn').classList.add('dev-unlocked');
+    } else {
+      document.getElementById('pin-err').textContent='Incorrect PIN';
+      pinBuf=''; updPinDots();
+    }
+    socket._pendingPinCheck = undefined;
+  }
+  // Always populate fields
+  Object.entries(d).forEach(([k,v]) => {
+    const el = document.getElementById('d-'+k);
+    if (el) el.value = v;
   });
-}
-function syncThemes(a){
-  document.querySelectorAll('.theme-sw').forEach(el=>el.classList.toggle('active',el.dataset.key===a));
-  document.getElementById('custom-panel').style.display=a==='custom'?'block':'none';
-}
-function selTheme(k){
-  if(k==='custom'){document.getElementById('custom-panel').style.display='block';syncThemes('custom');return;}
-  document.getElementById('custom-panel').style.display='none';
-  socket.emit('set_theme',{theme:k});
-}
-function liveTheme(){}
-function applyCustom(){
-  socket.emit('set_custom_theme',{light:document.getElementById('c-light').value,dark:document.getElementById('c-dark').value,move:document.getElementById('c-move').value,hint:document.getElementById('c-hint').value});
-  toast('Custom theme applied to LEDs');
+});
+
+function showDevPanel() { socket.emit('get_dev_settings'); document.getElementById('ov-dev').classList.add('show'); }
+
+function saveDevSettings() {
+  const fields = ['difficulty_default','difficulty_min','difficulty_max',
+    'movetime_default_ms','movetime_min_ms','movetime_max_ms',
+    'chess_led_brightness','startup_led_delay_s','button_debounce_s',
+    'hint_dismiss_s','undo_max_half_moves','stockfish_path',
+    'tts_rate','tts_volume','web_port','pgn_subdir','dev_pin'];
+  const payload = {};
+  fields.forEach(f => {
+    const el = document.getElementById('d-'+f);
+    if (el) payload[f] = el.value;
+  });
+  socket.emit('apply_dev_settings', payload);
 }
 
-// ═══ ACTIONS ═══
-function act(n){
-  socket.emit(n);
-  const m={hint:'Hint requested…',undo:'Undo requested…',save_usb:'Saving to USB…'};
-  if(m[n])toast(m[n]);
+// ═══ DISCO EASTER EGG ═══
+function triggerDisco() {
+  socket.emit('disco');
 }
 
-// ═══ SYSTEM POLLING ═══
-function pollSys(){
-  fetch('/api/system').then(r=>r.json()).then(d=>{
-    document.getElementById('sys-temp').textContent=d.cpu_temp_c!=='N/A'?d.cpu_temp_c+' °C':'—';
-    document.getElementById('sys-cpu').textContent=d.cpu_pct!=='N/A'?d.cpu_pct+' %':'—';
-    document.getElementById('sys-ram').textContent=d.ram_used_mb!=='N/A'?d.ram_used_mb+' / '+d.ram_total_mb+' MB':'—';
-  }).catch(()=>{});
-}
-pollSys();setInterval(pollSys,6000);
+socket.on('state_update', d => {
+  // Hint counter for physical hint button disco trigger
+  if (d.hint_move && d.hint_move !== hintMove) {
+    hintCount++;
+    if (hintCount >= 10) { hintCount=0; triggerDisco(); }
+  }
+});
 
-// ═══ OTA ═══
-function otaUpdate(){
-  const token=prompt('OTA token:');if(!token)return;
-  const restart=confirm('Restart after pull?');
-  const out=document.getElementById('ota-out');out.style.display='block';out.textContent='Running git pull…\n';
-  fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,restart})})
-    .then(r=>r.json()).then(d=>{out.textContent=d.error||d.output||'Done.';if(d.restarting)out.textContent+='\nRestarting…';})
-    .catch(e=>{out.textContent='Error: '+e;});
+// ═══ HELPERS ═══
+function closeOv(id) { document.getElementById(id).classList.remove('show'); }
+function toggleTheme() {
+  const html = document.documentElement;
+  html.dataset.theme = html.dataset.theme==='dark' ? 'light' : 'dark';
 }
 
-// ═══ TOAST ═══
-function toast(msg,type='ok',ms=3000){
-  const w=document.getElementById('toast-wrap'),t=document.createElement('div');
-  t.className='toast '+type;t.textContent=msg;w.appendChild(t);
-  requestAnimationFrame(()=>requestAnimationFrame(()=>t.classList.add('show')));
-  setTimeout(()=>{t.classList.remove('show');setTimeout(()=>t.remove(),300);},ms);
-}
+document.addEventListener('keydown', e => {
+  if (e.key==='Escape') {
+    ['ov-pin','ov-dev','ov-about','ov-theme'].forEach(closeOv);
+  }
+});
 
-// ═══ INIT ═══
-window.addEventListener('resize',drawBoard);
-new ResizeObserver(drawBoard).observe(document.getElementById('board-wrap'));
-buildThemes();drawBoard();
+['ov-about','ov-theme'].forEach(id => {
+  document.getElementById(id).addEventListener('click', function(e) {
+    if (e.target===this) closeOv(id);
+  });
+});
+
+drawBoard();
+
+// ═══ LED GRID ═══
+(function(){
+  const grid = document.getElementById('led-grid');
+  // Create 64 cells
+  for(let i=0;i<64;i++){
+    const c=document.createElement('div');
+    c.className='led-cell';
+    c.id='lc'+i;
+    grid.appendChild(c);
+  }
+
+  function updateGrid(pixels){
+    for(let i=0;i<64;i++){
+      const [r,g,b] = pixels[i] || [0,0,0];
+      const el = document.getElementById('lc'+i);
+      if (!el) continue;
+      const bright = r+g+b;
+      if(bright < 10){
+        el.style.background = '#111';
+        el.style.boxShadow = 'none';
+      } else {
+        const hex = '#'+[r,g,b].map(x=>x.toString(16).padStart(2,'0')).join('');
+        el.style.background = hex;
+        el.style.boxShadow = `0 0 6px 2px ${hex}66`;
+      }
+    }
+  }
+
+  socket.on('led_grid', d => updateGrid(d.grid));
+  socket.on('state_update', d => { if(d.led_grid) updateGrid(d.led_grid); });
+})();
 </script>
 </body>
 </html>

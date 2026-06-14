@@ -1,3 +1,4 @@
+from __future__ import annotations
 # =============================================================================
 # chess_engine/board_state.py
 # Author : Richard Pu
@@ -5,6 +6,7 @@
 # Purpose: Dual-representation board state — mirrors the Arduino currentBoard
 #          array for square occupancy, backed by a python-chess Board for FEN
 #          generation, legal move checking, and move history.
+#          New: undo support, capture detection, promotion detection.
 # =============================================================================
 
 import logging
