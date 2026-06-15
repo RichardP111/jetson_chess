@@ -34,7 +34,7 @@ class GameConfig:
     led_invert: bool          = False    # unused by adafruit_neopixel_spi
 
     # ── Button hardware ───────────────────────────────────────────────────────
-    button_debounce_s: float  = 0.30
+    button_debounce_s: float  = 0.05
     hint_pin: int             = 11    # Col_2 pin (hint cell is Row_3 Col_2)
     button_pins: dict         = field(default_factory=lambda: {
         1: 11,    # Row_4 Col_2
