@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 
 from config import CFG
 from hardware.leds import LEDController
-from hardware.buttons import ButtonController
+from hardware.buttons import ButtonController, MATRIX_MAP, HINT_POS
 from chess_engine.board_state import BoardState
 from chess_engine.stockfish import StockfishEngine
 from online.lichess import LichessClient
@@ -540,55 +540,142 @@ class ChessGame:
                 if self._new_game_requested.is_set():
                     raise _NewGameException()
 
-        btn = 0
+        col_map = {1: "a", 2: "b", 3: "c", 4: "d", 5: "e", 6: "f", 7: "g", 8: "h"}
+        row_map = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8"}
+
+        slots = ""
+
+        # Flush the hardware tracking states to ensure no lingering inputs carry over
+        all_cells = list(MATRIX_MAP.values()) + [HINT_POS]
+        for cell in all_cells:
+            self.buttons._low_count[cell] = 0
+            self.buttons._high_count[cell] = self.buttons.RELEASE_SAMPLES
+            self.buttons._armed[cell] = True
+
         while True:
+            # 1. Maintain control panel illumination states
             self.leds.control_panel_fill((255, 255, 255), start=0, count=4)
             self.leds.panel_show()
-            move_from = self._get_coordinates(btn)
-            move_to   = self._get_coordinates(0)
+
+            # 2. Render targeted prompts based on the precise character count gathered
+            if len(slots) == 0:
+                self.oled.show_move_input_screen(current, slots, "Select start column (A-H)")
+            elif len(slots) == 1:
+                self.oled.show_move_input_screen(current, slots, "Select start row (1-8)")
+            elif len(slots) == 2:
+                self.oled.show_move_input_screen(current, slots, "Select target column (A-H)")
+            elif len(slots) == 3:
+                self.oled.show_move_input_screen(current, slots, "Select target row (1-8)")
+
+            # 3. Handle move confirmation step once 2 full coordinate sets reside in memory
+            if len(slots) == 4:
+                self.leds.control_panel_set_pixel(4, (255, 255, 255))
+                self.leds.control_panel_set_pixel(5, (0, 0, 0))
+                self.leds.panel_show()
+                
+                self.display.light_up_move(slots, mode="Y")
+                self.oled.show_move_input_screen(current, slots, "Press OK (9) to confirm")
+                
+                btn = 0
+                while True:
+                    if self._web_move_event.is_set():
+                        self._web_move_event.clear()
+                        if self._web_move_queue:
+                            return self._web_move_queue.pop(0)
+                    
+                    # Call the persistent debouncer loop directly at high speed
+                    raw = self.buttons._scan_once()
+                    if isinstance(raw, int) and raw != 0:
+                        btn = raw
+                        break
+                        
+                    if self._new_game_requested.is_set():
+                        raise _NewGameException()
+                    time.sleep(0.002)  # 500Hz loop capture speed
+                
+                if btn == 9:
+                    self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
+                    self.leds.panel_show()
+                    return slots
+                else:
+                    print(f"[SYSTEM] Full move selection cleared via Button {btn}")
+                    self.anim.show_board_themed()
+                    slots = ""
+                    continue
+
+            # 4. Ultra-responsive 500Hz polling loop using built-in matrix tracking
             btn = 0
-            humans_move = move_from + move_to
-            self.leds.control_panel_set_pixel(4, (255, 255, 255))
-            self.leds.control_panel_set_pixel(5, (0, 0, 0))
-            self.leds.panel_show()
-            self.display.light_up_move(humans_move, mode="Y")
-            btn = 0
-            while btn == 0:
-                if self._web_move_event.wait(timeout=0.05):
+            while True:
+                if self._web_move_event.is_set():
                     self._web_move_event.clear()
                     if self._web_move_queue:
-                        web_uci = self._web_move_queue.pop(0)
-                        self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
-                        self.leds.panel_show()
-                        return web_uci
-                btn = self.buttons.detect_button_nowait() or 0
-            if btn == 9:
-                self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
-                self.leds.panel_show()
-                return humans_move
-            else:
-                print(f"[SYSTEM] Clean clear. Button {btn} pressed instead of OK (9).")
-                self.anim.show_board_themed()
-                btn = 0
+                        return self._web_move_queue.pop(0)
+                
+                raw = self.buttons._scan_once()
+                # Ensure we only pick up physical digit buttons (ignoring background 'hint' flags)
+                if isinstance(raw, int) and raw != 0:
+                    btn = raw
+                    break
+                    
+                if self._new_game_requested.is_set():
+                    raise _NewGameException()
+                time.sleep(0.002)  # 2ms matching sample rate window perfectly
 
-    def _get_coordinates(self, already_pressed: int = 0) -> str:
+            # 5. Core Backspace Interrupt Logic
+            if btn == 9 and len(slots) < 4:
+                if len(slots) > 0:
+                    slots = slots[:-1]
+                    print(f"[SYSTEM] Backspace triggered. Remaining input slots: {slots}")
+                
+                self.anim.show_board_themed()
+                if len(slots) >= 2:
+                    fc = self.board.col_from_char(slots[0])
+                    fr = self.board.row_from_char(slots[1])
+                    self.leds.chess_set_pixel(fc, fr, (0, 255, 0))
+                    self.leds.chess_show()
+                continue
+
+            # 6. Route structural matrix values depending on current coordinate slot expectations
+            if len(slots) == 0 or len(slots) == 2:
+                if btn in col_map:
+                    slots += col_map[btn]
+            elif len(slots) == 1 or len(slots) == 3:
+                if btn in row_map:
+                    slots += row_map[btn]
+
+            # 7. Dynamically latch LED pixels as valid sub-sequences formulate
+            if len(slots) == 2:
+                fc = self.board.col_from_char(slots[0])
+                fr = self.board.row_from_char(slots[1])
+                self.anim.show_board_themed()
+                self.leds.chess_set_pixel(fc, fr, (0, 255, 0))
+                self.leds.chess_show()
+
+    def _get_coordinates(self, already_pressed: int = 0, prefix: str = "") -> str:
         col_map = {1: "a", 2: "b", 3: "c", 4: "d", 5: "e", 6: "f", 7: "g", 8: "h"}
         row_map = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8"}
         col_names = {1:"A", 2:"B", 3:"C", 4:"D", 5:"E", 6:"F", 7:"G", 8:"H"}
 
         column = None
         while column is None:
+            # 1. Update the OLED to prompt for a column selection, showing any pre-existing input
+            self.oled.show_coordinate_prompt(step="col", partial=prefix)
+            
             btn = already_pressed if already_pressed != 0 else self.buttons.detect_button()
             already_pressed = 0
             column = col_map.get(btn)
             if column:
-                self.oled.show_status(f"Column {col_names[btn]} — press row (1-8)")
+                # 2. Immediately update the OLED to request the row for this specific column choice
+                self.oled.show_coordinate_prompt(step="row", partial=prefix + column.upper())
         time.sleep(0.1)
         row = None
         while row is None:
             btn = self.buttons.detect_button()
             row = row_map.get(btn)
         time.sleep(0.1)
+        
+        # 3. Flash the completed coordinate chunk to the screen
+        self.oled.show_coordinate_prompt(step="col", partial=prefix + column.upper() + row)
         return column + row
 
     def _web_move_received(self, uci: str):

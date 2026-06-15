@@ -237,10 +237,14 @@ class LEDController:
         self._push_led_state()
 
     def _push_led_state(self):
-        """Push current 8×8 LED colours to the web dashboard (lazy import)."""
+        """
+        Push current 8×8 LED colours to the web dashboard.
+        Fixed: Replaced range with reversed(range) to match top-down HTML grids.
+        """
         try:
             grid = []
-            for row in range(8):
+            # Sweep from row 7 (top/Rank 8) down to row 0 (bottom/Rank 1)
+            for row in reversed(range(8)):
                 for col in range(8):
                     idx    = self._square_to_index(col, row)
                     packed = self.chess.getPixelColor(idx)

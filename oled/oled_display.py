@@ -246,6 +246,34 @@ class OLEDDisplay:
         if self._current_screen == "game":
             self._draw_coordinate_prompt(step, partial)
 
+    def show_move_input_screen(self, current_turn: str, slots: str, prompt: str):
+        """Displays character-by-character coordinate progress using a crisp pass-board style layout."""
+        fs, fm, fl, ft = _fonts()
+        
+        # Build live slots for the text field (e.g. "E_", "E2", "E2 -> E_")
+        c1 = slots[0].upper() if len(slots) > 0 else "_"
+        r1 = slots[1]         if len(slots) > 1 else "_"
+        c2 = slots[2].upper() if len(slots) > 2 else "_"
+        r2 = slots[3]         if len(slots) > 3 else "_"
+        
+        move_str = f"{c1}{r1} \u2192 {c2}{r2}"
+        
+        with self._lock:
+            with canvas(self._device) as draw:
+                # Black base background
+                draw.rectangle((0, 0, W - 1, H - 1), fill="black")
+                
+                # Filled white header bar matching the pass board screen aesthetic
+                draw.rectangle((0, 0, W - 1, 15), fill="white")
+                draw.text((4, 1), f"{current_turn}'s Move", font=fs, fill="black")
+                
+                # Big, centered coordinates block
+                draw.text((22, 22), move_str, font=fl, fill="white")
+                
+                # Bottom dividing border line and step guidance prompt
+                draw.line((0, H - 12, W - 1, H - 12), fill="white")
+                draw.text((4, H - 10), prompt[:24], font=ft, fill="white")
+
     def clear(self):
         with self._lock:
             with canvas(self._device) as draw:
