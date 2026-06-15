@@ -85,8 +85,12 @@ class BoardState:
         return count
 
     def is_square_occupied(self, col: int, row: int) -> bool:
-        """row 0 = rank 8, col 0 = file a."""
-        return self.occupied[row][col] == 1
+        """
+        Fixed vertical rank inversion check.
+        Input row: 0 = rank 1 (bottom), 7 = rank 8 (top).
+        Internal occupied array row: 0 = rank 8 (top), 7 = rank 1 (bottom).
+        """
+        return self.occupied[7 - row][col] == 1
 
     def is_capture(self, uci: str) -> bool:
         """Return True if the move captures a piece (or is en passant)."""

@@ -1,35 +1,14 @@
 # =============================================================================
 # hardware/buttons.py
 # Author : Richard Pu
-# Created: 2026-06-10  |  Revised: 2026-06-14
-# Purpose: Button input via Jetson Orin Nano GPIO — BOARD mode.
-#
-#          Hardware: 2-column × 5-row matrix.
-#          Col_1 (pin 7)  has a 470Ω pull-up resistor to 3.3V.
-#          Col_2 (pin 11) has an internal pull-up — no resistor needed.
-#          Rows are driven LOW one at a time to scan.
-#          Pressed = column reads LOW when its row is driven LOW.
-#
-#          Matrix layout:
-#            Col_1(7)  Col_2(11)
-#  Row_1(36)  btn4      btn3
-#  Row_2(37)  btn8      btn7
-#  Row_3(32)  btn9(OK)  hint
-#  Row_4(18)  btn2      btn1
-#  Row_5(22)  btn6      btn5
-#
-#          Hint button: Row_3 Col_2 (pin 11 / row pin 32).
-#          OK button  : btn9 Row_3 Col_1 (pin 7 / row pin 32).
-#
-#          Software debounce: CONFIRM_SAMPLES consecutive LOW reads to
-#          confirm press; RELEASE_SAMPLES consecutive HIGH reads to re-arm.
-#
-#          Set MOCK_BUTTONS=1 to run without hardware (keyboard input).
+# Purpose: High-performance button matrix driver for Jetson Orin Nano.
+#          Fixed: Self-contained debounce sweep for instant nowait registration.
 # =============================================================================
 
 from __future__ import annotations
 
 import os
+import sys
 import time
 import logging
 import threading
@@ -41,7 +20,7 @@ log = logging.getLogger(__name__)
 
 MOCK = os.environ.get("MOCK_BUTTONS", "0") == "1"
 
-# ── GPIO import ───────────────────────────────────────────────────────────────
+# ── GPIO import & Mock Fallback ───────────────────────────────────────────────
 
 if not MOCK:
     try:
@@ -74,36 +53,30 @@ if MOCK:
             self._pins[pin] = val
 
         def input(self, pin):
-            # When a row is LOW (being scanned) and a key matches, return LOW
             if not self._q.empty():
                 pending = self._q.queue[0]
                 col_pin, row_pin = pending
-                # Is this row currently driven LOW?
                 if self._pins.get(row_pin, self.HIGH) == self.LOW:
                     if pin == col_pin:
+                        self._q.get_nowait()
                         return self.LOW
             return self.HIGH
 
-        def _consume(self):
-            """Remove top of queue — call after full matrix scan confirms press."""
-            if not self._q.empty():
-                self._q.get_nowait()
-
         def _start_reader(self):
             MATRIX = {
-                "1": (COL_PINS[0], ROW_PINS[0]),
-                "2": (COL_PINS[1], ROW_PINS[0]),
-                "3": (COL_PINS[2], ROW_PINS[0]),
-                "4": (COL_PINS[3], ROW_PINS[0]),
-                "5": (COL_PINS[0], ROW_PINS[1]),
-                "6": (COL_PINS[1], ROW_PINS[1]),
-                "7": (COL_PINS[2], ROW_PINS[1]),
-                "8": (COL_PINS[3], ROW_PINS[1]),
-                "9": (COL_PINS[0], ROW_PINS[2]),
-                "h": (COL_PINS[1], ROW_PINS[2]),
+                "1": (COL_PINS[1], ROW_PINS[3]),
+                "2": (COL_PINS[0], ROW_PINS[3]),
+                "3": (COL_PINS[1], ROW_PINS[0]),
+                "4": (COL_PINS[0], ROW_PINS[0]),
+                "5": (COL_PINS[1], ROW_PINS[4]),
+                "6": (COL_PINS[0], ROW_PINS[4]),
+                "7": (COL_PINS[1], ROW_PINS[1]),
+                "8": (COL_PINS[0], ROW_PINS[1]),
+                "9": (COL_PINS[1], ROW_PINS[2]),
+                "h": (COL_PINS[0], ROW_PINS[2]),
             }
             def _read():
-                print("[MockGPIO] Ready — type 1-9 (buttons) or h (hint), then Enter")
+                print("[MockGPIO] Ready — type 1-9 or h, then Enter")
                 while True:
                     try:
                         key = input("btn> ").strip().lower()
@@ -116,63 +89,37 @@ if MOCK:
     GPIO = _MockGPIO()  # type: ignore
 
 
-# ── Matrix pin definitions ────────────────────────────────────────────────────
-#
-# Physical BOARD pin numbers (from config, kept in sync).
-# Columns have 470Ω pull-ups to 3.3V → read HIGH at rest.
-# Rows are output pins, driven LOW to scan.
+# ── Validated 2x5 Matrix Wire Mapping ─────────────────────────────────────────
 
-COL_PINS = [7, 11]              # Col_1 (470Ω to 3.3V), Col_2 (internal pull-up)
-ROW_PINS = [36, 37, 32, 18, 22] # Row_1 … Row_5
+COL_PINS = [7, 11]              
+ROW_PINS = [36, 37, 32, 18, 22] 
 
-# Button number → (row_idx, col_idx) in the matrix
-#
-#          Col_1(7)  Col_2(11)
-# Row_1(36)  btn3      btn4      ← your "Button 3" and "Button 4"
-# Row_2(37)  btn7      btn8
-# Row_3(32)  btn9(OK)  hint
-# Row_4(18)  btn1      btn2
-# Row_5(22)  btn5      btn6
-#
-# Mapped so btn1-9 match the chess column/row input order:
 MATRIX_MAP = {
-    1: (3, 1),  # Row_4 Col_2
-    2: (3, 0),  # Row_4 Col_1
-    3: (0, 1),  # Row_1 Col_2
-    4: (0, 0),  # Row_1 Col_1
-    5: (4, 1),  # Row_5 Col_2
-    6: (4, 0),  # Row_5 Col_1
-    7: (1, 1),  # Row_2 Col_2
-    8: (1, 0),  # Row_2 Col_1
-    9: (2, 1),  # Row_3 Col_2  (OK / confirm) ← swapped
+    1: (3, 1),  # Row Index 3, Col Index 1 -> Button 1
+    2: (3, 0),  # Row Index 3, Col Index 0 -> Button 2
+    3: (0, 1),  # Row Index 0, Col Index 1 -> Button 3
+    4: (0, 0),  # Row Index 0, Col Index 0 -> Button 4
+    5: (4, 1),  # Row Index 4, Col Index 1 -> Button 5
+    6: (4, 0),  # Row Index 4, Col Index 0 -> Button 6
+    7: (1, 1),  # Row Index 1, Col Index 1 -> Button 7
+    8: (1, 0),  # Row Index 1, Col Index 0 -> Button 8
+    9: (2, 1),  # Row Index 2, Col Index 1 -> Button 9 (OK / Confirm)
 }
-HINT_POS = (2, 0)   # Row_3 Col_1 ← swapped
+HINT_POS = (2, 0)   # Row Index 2, Col Index 0 -> Hint Button
 
-# Reverse map: (row_idx, col_idx) → button number or "hint"
 _CELL_TO_BTN: dict = {v: k for k, v in MATRIX_MAP.items()}
 _CELL_TO_BTN[HINT_POS] = "hint"
 
 
 class ButtonController:
-    """
-    Matrix button driver for Jetson Orin Nano.
-
-    Scans a 4-col × 3-row matrix.  Columns have external pull-ups (470Ω to
-    3.3V) so they rest HIGH.  Rows are output pins driven LOW to select.
-    A pressed button pulls its column LOW while its row is LOW.
-
-    Debounce: CONFIRM_SAMPLES consecutive LOW reads to confirm press.
-              RELEASE_SAMPLES consecutive HIGH reads to re-arm.
-    """
-
-    CONFIRM_SAMPLES   = 1        # 1 LOW read to confirm — fastest response
-    RELEASE_SAMPLES   = 2        # 2 HIGH reads to re-arm
-    SAMPLE_INTERVAL_S = 0.001   # 1 ms between scans
+    CONFIRM_SAMPLES   = 4        
+    RELEASE_SAMPLES   = 4        
+    SAMPLE_INTERVAL_S = 0.002   
 
     def __init__(self):
+        self._lock = threading.Lock()
+        
         GPIO.setwarnings(False)
-
-        # Clear any stale GPIO state
         try:
             import warnings
             with warnings.catch_warnings():
@@ -183,23 +130,12 @@ class ButtonController:
 
         GPIO.setmode(GPIO.BOARD)
 
-        # Set up column pins as inputs (pull-ups are external resistors)
         for pin in COL_PINS:
-            try:
-                GPIO.setup(pin, GPIO.IN)
-            except Exception as e:
-                log.error(f"GPIO.setup failed for col pin {pin}: {e}")
-                raise
+            GPIO.setup(pin, GPIO.IN)
 
-        # Set up row pins as outputs, initially HIGH (inactive)
         for pin in ROW_PINS:
-            try:
-                GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH)
-            except Exception as e:
-                log.error(f"GPIO.setup failed for row pin {pin}: {e}")
-                raise
+            GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH)
 
-        # Per-cell debounce state: keyed by (row_idx, col_idx)
         all_cells = list(MATRIX_MAP.values()) + [HINT_POS]
         self._low_count:  dict = {c: 0  for c in all_cells}
         self._high_count: dict = {c: self.RELEASE_SAMPLES for c in all_cells}
@@ -210,13 +146,7 @@ class ButtonController:
         self._hint_poll_running = False
         self._hint_poll_thread: Optional[threading.Thread] = None
 
-        log.info(
-            f"ButtonController ready — {len(COL_PINS)}×{len(ROW_PINS)} matrix, "
-            f"cols={COL_PINS}, rows={ROW_PINS}, "
-            f"debounce {self.CONFIRM_SAMPLES}×{self.SAMPLE_INTERVAL_S*1000:.0f}ms"
-        )
-
-    # ── Public API ────────────────────────────────────────────────────────────
+        log.info("ButtonController initialized successfully.")
 
     def register_hint_callback(self, callback: Callable):
         self._hint_callback = callback
@@ -227,8 +157,6 @@ class ButtonController:
         self._hint_poll_thread.start()
 
     def detect_button(self) -> int:
-        """Block until a confirmed button press (1-9). Never returns 'hint'."""
-        # Reset debounce state for button cells only
         for cell in MATRIX_MAP.values():
             self._low_count[cell]  = 0
             self._high_count[cell] = self.RELEASE_SAMPLES
@@ -237,56 +165,71 @@ class ButtonController:
         while True:
             result = self._scan_once()
             if isinstance(result, int):
+                print(f" [HARDWARE] Button {result} PRESSED (blocking mode)")
+                sys.stdout.flush()
+                if not MOCK:
+                    while True:
+                        pressed = self._scan_matrix()
+                        if pressed is None:
+                            break
+                        time.sleep(0.005)
+                print(f" [HARDWARE] Button {result} RELEASED")
+                sys.stdout.flush()
                 return result
             time.sleep(self.SAMPLE_INTERVAL_S)
 
     def detect_button_nowait(self) -> int:
-        """Non-blocking scan. Returns button number (1-9) if pressed, else 0."""
-        result = self._scan_once()
-        return result if isinstance(result, int) else 0
+        # Rapid single-scan to check for instant contact
+        pressed_cell = self._scan_matrix()
+        if pressed_cell is None:
+            return 0
+        
+        # Debounce the input here using high-speed sampling
+        cell = pressed_cell
+        match_count = 1
+        for _ in range(3):
+            time.sleep(0.002)
+            if self._scan_matrix() == cell:
+                match_count += 1
+                
+        if match_count >= 3:
+            btn = _CELL_TO_BTN.get(cell)
+            if isinstance(btn, int):
+                print(f" [HARDWARE] Button {btn} DETECTED (debounced nowait)")
+                sys.stdout.flush()
+                return btn
+        return 0
 
     def is_ok_held(self) -> bool:
-        """Return True if button 9 (OK) is currently held LOW."""
         return self._is_cell_low(*MATRIX_MAP[9])
 
     def is_button8_held(self) -> bool:
-        """Return True if button 8 is currently held LOW."""
         return self._is_cell_low(*MATRIX_MAP[8])
 
     def cleanup(self):
         self._hint_poll_running = False
         if self._hint_poll_thread:
             self._hint_poll_thread.join(timeout=1.0)
-        # Restore rows to input before cleanup to avoid driving anything
-        for pin in ROW_PINS:
-            try:
-                GPIO.setup(pin, GPIO.IN)
-            except Exception:
-                pass
-        GPIO.cleanup()
-
-    # ── Internal scanning ─────────────────────────────────────────────────────
+        with self._lock:
+            for pin in ROW_PINS:
+                try:
+                    GPIO.setup(pin, GPIO.IN)
+                except Exception:
+                    pass
+            GPIO.cleanup()
 
     def _scan_matrix(self) -> Optional[tuple]:
-        """
-        Drive each row LOW in turn and read all columns.
-        Returns (row_idx, col_idx) of the first pressed cell, or None.
-        """
-        for row_idx, row_pin in enumerate(ROW_PINS):
-            GPIO.output(row_pin, GPIO.LOW)
-            time.sleep(0.0005)   # 0.5ms settle time
-            for col_idx, col_pin in enumerate(COL_PINS):
-                if GPIO.input(col_pin) == GPIO.LOW:
-                    GPIO.output(row_pin, GPIO.HIGH)
-                    return (row_idx, col_idx)
-            GPIO.output(row_pin, GPIO.HIGH)
-        return None
+        with self._lock:
+            for row_idx, row_pin in enumerate(ROW_PINS):
+                GPIO.output(row_pin, GPIO.LOW)
+                for col_idx, col_pin in enumerate(COL_PINS):
+                    if GPIO.input(col_pin) == GPIO.LOW:
+                        GPIO.output(row_pin, GPIO.HIGH)
+                        return (row_idx, col_idx)
+                GPIO.output(row_pin, GPIO.HIGH)
+            return None
 
     def _scan_once(self):
-        """
-        Scan the matrix and apply debounce.
-        Returns int button number, 'hint', or None.
-        """
         pressed_cell = self._scan_matrix()
 
         for cell in list(MATRIX_MAP.values()) + [HINT_POS]:
@@ -303,29 +246,26 @@ class ButtonController:
                 self._high_count[cell] += 1
                 if not self._armed[cell] and self._high_count[cell] >= self.RELEASE_SAMPLES:
                     self._armed[cell] = True
-
         return None
 
     def _is_cell_low(self, row_idx: int, col_idx: int, samples: int = 3) -> bool:
-        """Read a specific cell without debounce (for hold detection)."""
-        row_pin = ROW_PINS[row_idx]
-        col_pin = COL_PINS[col_idx]
-        GPIO.output(row_pin, GPIO.LOW)
-        time.sleep(0.0005)
-        count = sum(1 for _ in range(samples) if GPIO.input(col_pin) == GPIO.LOW)
-        GPIO.output(row_pin, GPIO.HIGH)
-        return count >= samples
+        with self._lock:
+            row_pin = ROW_PINS[row_idx]
+            col_pin = COL_PINS[col_idx]
+            GPIO.output(row_pin, GPIO.LOW)
+            count = sum(1 for _ in range(samples) if GPIO.input(col_pin) == GPIO.LOW)
+            GPIO.output(row_pin, GPIO.HIGH)
+            return count >= samples
 
     def _hint_poll_loop(self):
-        """Background thread polling the hint button cell."""
-        cell = HINT_POS
+        filename_cell = HINT_POS
         low_count  = 0
         high_count = self.RELEASE_SAMPLES
         armed      = True
 
         while self._hint_poll_running:
             pressed_cell = self._scan_matrix()
-            if pressed_cell == cell:
+            if pressed_cell == filename_cell:
                 high_count = 0
                 if armed:
                     low_count += 1
@@ -336,6 +276,8 @@ class ButtonController:
                         if now - self._last_hint_time >= 0.2:
                             self._last_hint_time = now
                             if self._hint_callback:
+                                print(" [HARDWARE] HINT Button Triggered")
+                                sys.stdout.flush()
                                 threading.Thread(
                                     target=self._hint_callback,
                                     args=(None,),
@@ -346,4 +288,4 @@ class ButtonController:
                 high_count += 1
                 if not armed and high_count >= self.RELEASE_SAMPLES:
                     armed = True
-            time.sleep(self.SAMPLE_INTERVAL_S)
+            time.sleep(0.03)

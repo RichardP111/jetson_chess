@@ -1,8 +1,9 @@
 # =============================================================================
 # ui/animations.py
 # Author : Richard Pu
-# Created: 2026-06-10  |  Revised: 2026-06-12
 # Purpose: LED animations and themes for the chessboard strip.
+#          Fixed: Added automated board theme restore on thinking termination
+#                 to clear stray frozen spinner frames completely.
 # =============================================================================
 
 import time
@@ -19,15 +20,10 @@ log = logging.getLogger(__name__)
 Color = Tuple[int, int, int]
 
 # ── Built-in theme definitions ────────────────────────────────────────────────
-# Themes must match web dashboard theme names exactly so the board
-# reflects whatever the user picks on the dashboard.
-# Theme colours are sent to WS2812b at ~30% brightness (76/255).
-# Dark squares need to be bright enough to be visually distinct from light
-# squares even at reduced brightness — aim for ~3:1 ratio minimum.
 THEMES = {
     "classic": {
-        "light": (255, 220, 150),  # warm cream — clearly bright
-        "dark":  ( 15,   8,   2),  # near-black brown — maximum contrast
+        "light": (255, 220, 150),  # warm cream
+        "dark":  ( 15,   8,   2),  # near-black brown
         "move":  (  0, 255,   0),  # bright green move
         "hint":  (  0, 150, 255),  # blue hint
     },
@@ -79,9 +75,7 @@ class AnimationEngine:
 
     def set_theme(self, name_or_dict: Union[str, dict]):
         """
-        Accept either a built-in theme name (str) or a custom theme dict
-        with keys: 'light', 'dark', 'move', 'hint' as (R, G, B) tuples
-        or '#rrggbb' hex strings.
+        Accept either a built-in theme name (str) or a custom theme dict.
         """
         if isinstance(name_or_dict, dict):
             parsed = {}
@@ -100,23 +94,17 @@ class AnimationEngine:
             self._theme_name = name_or_dict
             self._theme      = dict(THEMES[name_or_dict])
             log.info(f"LED theme: {name_or_dict}")
-        # Immediately refresh board LEDs with new theme
         self.show_board_themed()
 
     def get_theme_names(self) -> list:
         return list(THEMES.keys())
 
     def show_board_themed(self):
-        """Draw the standard chess chessboard pattern on the LEDs.
-        Light squares: (col + row) % 2 == 0
-        Dark squares:  (col + row) % 2 == 1
-        Rows run bottom-to-top: row 0 = rank 1, row 7 = rank 8.
-        """
+        """Draw the standard chess chessboard pattern on the LEDs."""
         light = self._theme["light"]
         dark  = self._theme["dark"]
         for row in range(8):
             for col in range(8):
-                # a1 (col=0,row=0) is dark in standard chess
                 colour = dark if (col + row) % 2 == 0 else light
                 self.leds.chess_set_pixel(col, row, colour)
         self.leds.chess_show()
@@ -171,7 +159,6 @@ class AnimationEngine:
     def promotion_flash(self, piece_char: str, pulses: int = 3):
         """
         Brief colour flash on the whole board to confirm a promotion choice.
-          Q = white, R = red, B = blue, N = yellow
         """
         colours = {
             "q": (255, 255, 255),
@@ -255,9 +242,12 @@ class AnimationEngine:
         self._bg_thread.start()
 
     def stop_thinking_animation(self):
+        """Kills background spinner loop and immediately flashes away artifacts."""
         self._stop_bg.set()
         if self._bg_thread:
             self._bg_thread.join(timeout=1.0)
+        # Automatically restore the basic board theme squares to clean the canvas
+        self.show_board_themed()
 
     def _spinner_loop(self, color: Color):
         path = (
@@ -284,7 +274,7 @@ class AnimationEngine:
             time.sleep(0.05)
 
     def _square_color(self, col: int, row: int) -> Color:
-        is_light = (col + row) % 2 == 1  # a1(0,0) is dark, so odd=light
+        is_light = (col + row) % 2 == 1
         return self._theme["light"] if is_light else self._theme["dark"]
 
     # ── Board wipe ────────────────────────────────────────────────────────────
@@ -343,6 +333,5 @@ class AnimationEngine:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _hex_to_rgb(hex_str: str) -> Tuple[int, int, int]:
-    """Convert '#rrggbb' to (r, g, b)."""
     h = hex_str.lstrip("#")
     return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))

@@ -1,12 +1,3 @@
-# =============================================================================
-# ui/display.py
-# Author : Richard Pu
-# Created: 2026-06-10  |  Revised: 2026-06-12
-# Purpose: LED board display logic. Ports all visual functions from the
-#          original Arduino sketch and adds new promotion-choice display and
-#          undo indicator.
-# =============================================================================
-
 import time
 import logging
 from hardware.leds import LEDController
@@ -108,11 +99,6 @@ class Display:
     def light_up_move(self, uci: str, mode: str = "Y"):
         """
         Illuminate source and destination squares for a UCI move.
-
-        mode:
-          'Y' — show and continue immediately
-          'N' — wait for OK button (btn 9) before proceeding
-          'H' — hint in CYAN, auto-dismiss after CFG.hint_dismiss_s seconds
         """
         if len(uci) < 4:
             log.warning(f"light_up_move: UCI too short: {uci!r}")
@@ -156,12 +142,7 @@ class Display:
 
     def show_promotion_choices(self):
         """
-        Display four coloured quadrants for promotion piece selection:
-          Top-left  (Q)  = white
-          Top-right (R)  = red
-          Bot-left  (B)  = blue
-          Bot-right (N)  = yellow
-        Buttons 1-4 select the piece.
+        Display four coloured quadrants for promotion piece selection
         """
         self.leds.chess_fill(BLACK)
         # Q — white — top-left 4×4
@@ -218,17 +199,17 @@ class Display:
     # ── Setup icons ────────────────────────────────────────────────────────
 
     def show_difficulty_icon(self):
-        """'L' shape in MAGENTA — shown during difficulty selection."""
+        """'L' shape in MAGENTA — Aligned to hardware row orientation."""
         self.leds.chess_fill(BLACK)
-        self.leds.chess_fast_vline(x=2, y=2, h=4, color=MAGENTA)
-        self.leds.chess_fast_hline(x=2, y=6, w=4, color=MAGENTA)
+        self.leds.chess_fast_vline(x=2, y=1, h=5, color=MAGENTA)  # Stem from row 1 to 5
+        self.leds.chess_fast_hline(x=2, y=1, w=4, color=MAGENTA)  # Bottom base at row 1
         self.leds.chess_show()
 
     def show_timeout_icon(self):
-        """Exclamation mark in MAGENTA — shown during timeout selection."""
+        """'T' shape in MAGENTA — Aligned to hardware row orientation."""
         self.leds.chess_fill(BLACK)
-        self.leds.chess_fast_vline(x=3, y=2, h=5, color=MAGENTA)
-        self.leds.chess_fast_hline(x=2, y=2, w=3, color=MAGENTA)
+        self.leds.chess_fast_vline(x=3, y=1, h=5, color=MAGENTA)  # Stem from row 1 to 5
+        self.leds.chess_fast_hline(x=2, y=5, w=3, color=MAGENTA)  # Top crossbar at row 5
         self.leds.chess_show()
 
     def show_colour_choice_icon(self):
@@ -242,13 +223,13 @@ class Display:
         self.leds.chess_show()
 
     def show_undo_icon(self):
-        """Orange left-arrow on the board — shown briefly after undo."""
+        """Orange left-arrow on the board — Aligned to hardware row center."""
         self.leds.chess_fill(BLACK)
-        # Arrow shaft row 3
+        # Centered shaft on row 4
         for col in range(2, 7):
-            self.leds.chess_set_pixel(col, 3, ORANGE)
-        # Arrowhead
-        self.leds.chess_set_pixel(1, 3, ORANGE)
-        self.leds.chess_set_pixel(2, 2, ORANGE)
-        self.leds.chess_set_pixel(2, 4, ORANGE)
+            self.leds.chess_set_pixel(col, 4, ORANGE)
+        # Arrowhead point and wings
+        self.leds.chess_set_pixel(1, 4, ORANGE)
+        self.leds.chess_set_pixel(2, 3, ORANGE)
+        self.leds.chess_set_pixel(2, 5, ORANGE)
         self.leds.chess_show()
