@@ -106,6 +106,7 @@ class ChessGame:
             slider_preview   = self._slider_preview,
             disco            = self._disco_mode,
             web_ok           = self._web_ok_received,
+            load_usb_game    = self._load_game_from_usb,
         )
         web_server.start_server()
         web_server.update_state(voice_enabled=self._voice_enabled)
@@ -678,6 +679,56 @@ class ChessGame:
         top3 = blunders[:3]
         self.oled.show_analysis(top3)
         web_server.update_state(status=f"Analysis: {len(top3)} blunder(s) found")
+
+    def _load_game_from_usb(self, filename: str):
+        """
+        Bypasses normal modes to rebuild an archived match history sequence directly onto the board layout.
+        """
+        log.info(f"[LOADER] Accessing flash drive for game file: {filename}")
+        moves = usb.load_game(filename)
+        
+        if moves is None:
+            self.oled.show_status("USB Read Error")
+            return
+
+        # 1. Clear out active values to build the state cleanly
+        self.board.reset()
+        self.suggested_best_move = ""
+        self._last_move_was_web = True
+
+        self.oled.show_status("Loading moves...")
+        self.anim.board_wipe((0, 0, 0), direction="left")
+
+        # 2. Sequential state injection playback loop
+        for uci in moves:
+            if self._check_move_legal(uci):
+                self.board.apply_move(uci)
+                # Render intermediate updates onto the layout
+                self.anim.move_trail(uci[:2], uci[2:4])
+                time.sleep(0.08) # Visual cascade step delay
+            else:
+                log.error(f"[LOADER] Encountered illegal move string step: {uci}")
+                break
+
+        # 3. Commit layout updates back to active states
+        self.anim.show_board_themed()
+        current = self._current_turn()
+        
+        self.oled.show_game(
+            current,
+            last_move=self.board._move_history_uci()[-1] if self.board._move_history_uci() else "",
+            move_history=self.board._move_history_uci(),
+            eval_score=self.stockfish.evaluate(self.board.fen())
+        )
+        
+        web_server.update_state(
+            fen=self.board.fen(),
+            move_history=self.board._move_history_uci(),
+            whose_turn=current,
+            status=f"Loaded: {filename}",
+            game_active=True
+        )
+        log.info(f"[LOADER] Playback complete. Successfully loaded {len(moves)} moves.")
 
     def _save_to_usb(self):
         if not usb.is_available():

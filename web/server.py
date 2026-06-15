@@ -17,6 +17,7 @@ import chess.svg
 
 from flask import Flask, render_template_string, jsonify, request, Response
 from flask_socketio import SocketIO, emit
+from usb_storage import usb
 
 from config import CFG
 
@@ -74,6 +75,7 @@ _callbacks = {
     "web_setup_answer":   None,   # called with (value) during setup
     "slider_preview":      None,   # called with (phase, value) on drag
     "disco":              None,   # easter egg
+    "load_usb_game": None,
 }
 
 
@@ -422,6 +424,32 @@ def on_apply_dev_settings(data):
         "changed": changed,
         "note":    "Settings are live for this session. Restart to revert.",
     })
+
+@socketio.on("request_usb_games")
+def handle_request_usb_games():
+    """
+    Fires when the web dashboard requests a list of all game files on the stick.
+    """
+    if usb.is_available():
+        games = usb.list_saved_games()
+        emit("usb_games_list", {"available": True, "games": games})
+    else:
+        emit("usb_games_list", {"available": False, "games": []})
+
+@socketio.on("trigger_load_game")
+def handle_trigger_load_game(data):
+    """
+    Fires when a user clicks a specific game file from their browser window.
+    """
+    filename = data.get("filename")
+    if not filename:
+        return
+        
+    log.info(f"Web requested loading match file: {filename}")
+    if _callbacks["load_usb_game"]:
+        # Launch the loader routine safely inside its own operational thread context
+        import threading
+        threading.Thread(target=_callbacks["load_usb_game"], args=(filename,), daemon=True).start()
 
 
 # ── Dashboard HTML ─────────────────────────────────────────────────────────────
