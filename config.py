@@ -65,6 +65,8 @@ class GameConfig:
     undo_max_half_moves: int = 10    # max half-moves the undo stack holds
     startup_led_delay_s: float = 0.015  # fast sweep — not the original 1 s per LED
     web_splash_hold_s: float   = 5.0    # how long to show splash before hiding
+    menu_sleep_timeout_s: float = 60.0  # Inactivity seconds before menu sleep mode kicks in
+    hint_dismiss_s: float    = 4.0   # seconds hint stays lit before auto-dismiss
 
     # ── Game save (USB) ───────────────────────────────────────────────────────
     usb_mount_paths: list = field(default_factory=lambda: [

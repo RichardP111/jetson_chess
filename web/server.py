@@ -1,8 +1,9 @@
 # =============================================================================
 # web/server.py
 # Author : Richard Pu
-# Created: 2026-06-10  |  Revised: 2026-06-14
+# Created: 2026-06-10  |  Revised: 2026-06-15
 # Purpose: Real-time web dashboard for the Jetson smart chessboard.
+#          Includes real-time hardware OLED text screen mirror replication.
 # =============================================================================
 
 import os
@@ -57,6 +58,7 @@ _state = {
     "disco_active":     False,
     "led_grid":         [[0,0,0]]*64,
     "draw_reason":      "",
+    "oled_lines":       ["Starting setup...", "", "", ""],  # Mirrors physical row states
 }
 _state_lock = threading.Lock()
 
@@ -75,7 +77,7 @@ _callbacks = {
 }
 
 
-# ── Public API (called from main.py) ───────────────────────────────────────────
+# ── Public API (called from main.py / oled modules) ───────────────────────────
 
 def update_state(**kwargs):
     with _state_lock:
@@ -88,6 +90,15 @@ def update_led_grid(grid: list):
     with _state_lock:
         _state["led_grid"] = grid
     socketio.emit("led_grid", {"grid": grid})
+
+
+def update_oled_text(lines: list):
+    """Pushes a list of text rows to live mirror the hardware OLED panel on web."""
+    with _state_lock:
+        # Pad or clip arrays safely to preserve standard 4-row layout lines
+        processed = [str(lines[i]) if i < len(lines) else "" for i in range(4)]
+        _state["oled_lines"] = processed
+    socketio.emit("oled_update", {"lines": processed})
 
 
 def register_callbacks(**kw):
@@ -134,6 +145,7 @@ def _push_state():
             "disco_active":  _state["disco_active"],
             "led_grid":      _state["led_grid"],
             "draw_reason":   _state["draw_reason"],
+            "oled_lines":    _state["oled_lines"],
         }
     socketio.emit("state_update", payload)
 
@@ -460,8 +472,25 @@ a{color:var(--gold);text-decoration:none}
 .icon-btn:hover{border-color:var(--gold);color:var(--gold)}
 
 /* ── Layout ── */
-.main{display:grid;grid-template-columns:1fr 340px;gap:16px;padding:16px;max-width:1200px;margin:0 auto}
-@media(max-width:900px){.main{grid-template-columns:1fr}}
+.main {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 16px;
+  padding: 16px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+@media(max-width:900px){
+  .main { grid-template-columns: 1fr; }
+  .diagnostics-row { grid-template-columns: 1fr !important; }
+}
+
+.diagnostics-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 14px;
+}
 
 /* ── Board ── */
 .board-wrap{background:var(--surface);border-radius:var(--r-xl);padding:16px;border:1px solid var(--border)}
@@ -499,7 +528,7 @@ canvas{border-radius:var(--r-md);cursor:pointer;max-width:100%;touch-action:none
 .ctrl-btn.danger{border-color:var(--red);color:var(--red)}
 .ctrl-btn.danger:hover{background:rgba(244,67,54,.1)}
 .ctrl-btn:disabled{opacity:.4;cursor:not-allowed}
-.ctrl-btn.full{grid-column:1/-1}
+.ctrl-btn.full{grid-column:1/-1; width: 100%;}
 
 /* ── Move history ── */
 .history-list{max-height:160px;overflow-y:auto;font-family:'Google Sans Mono',monospace;font-size:12px;color:var(--text-dim);display:grid;grid-template-columns:auto 1fr 1fr;gap:2px 8px}
@@ -508,13 +537,72 @@ canvas{border-radius:var(--r-md);cursor:pointer;max-width:100%;touch-action:none
 .history-list .move-b{color:var(--text-dim)}
 .history-list .move-w.last,.history-list .move-b.last{color:var(--gold);font-weight:600}
 
-/* ── Theme ── */
+/* ── Modern Theme Designer ── */
 .theme-pills{display:flex;flex-wrap:wrap;gap:6px}
 .theme-pill{padding:4px 12px;border-radius:20px;border:1px solid var(--border);background:var(--surface2);color:var(--text-dim);font-size:12px;cursor:pointer;transition:.2s}
 .theme-pill:hover,.theme-pill.active{border-color:var(--gold);color:var(--gold)}
-.colour-row{display:flex;gap:10px;margin-top:8px;flex-wrap:wrap}
-.colour-item{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:11px;color:var(--text-dim)}
-input[type=color]{width:36px;height:36px;border:none;padding:0;background:none;cursor:pointer;border-radius:6px}
+
+.theme-designer-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-top: 14px;
+}
+@media(max-width:400px){ .theme-designer-grid { grid-template-columns: 1fr; } }
+
+.picker-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  transition: border-color 0.2s, transform 0.1s;
+}
+.picker-card:hover {
+  border-color: var(--gold);
+  transform: translateY(-1px);
+ animate  }
+.picker-card input[type="color"] {
+  -webkit-appearance: none;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  width: 38px;
+  height: 38px;
+  cursor: pointer;
+  background: none;
+  padding: 0;
+}
+.picker-card input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+.picker-card input[type="color"]::-webkit-color-swatch { border: none; border-radius: 50%; }
+
+.picker-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.picker-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.picker-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.theme-note {
+  background: rgba(201, 168, 76, 0.06);
+  border: 1px solid rgba(201, 168, 76, 0.15);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--gold);
+  line-height: 1.4;
+  margin-top: 6px;
+  text-align: left;
+}
 
 /* ── Toggle ── */
 .toggle-row{display:flex;align-items:center;justify-content:space-between;padding:4px 0}
@@ -540,7 +628,7 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
 
 /* ── PIN ── */
 .pin-modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:28px 24px 20px;text-align:center;width:100%;max-width:290px}
-.pin-title{font-size:16px;font-weight:600;margin-bottom:16px}
+.pin-toggle{font-size:16px;font-weight:600;margin-bottom:16px}
 .pin-dots{display:flex;gap:10px;justify-content:center;margin-bottom:16px}
 .pd{width:14px;height:14px;border-radius:50%;border:2px solid var(--border);background:transparent;transition:.2s}
 .pd.filled{background:var(--gold);border-color:var(--gold)}
@@ -569,6 +657,10 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
 /* ── USB ── */
 #usb-status{font-size:12px;color:var(--text-dim);margin-top:6px}
 
+/* ── Virtual OLED Mirror Container ── */
+.oled-screen-wrap{background:#000000;border:1px solid var(--border);border-radius:var(--r-md);padding:10px 12px;font-family:'Google Sans Mono',monospace;font-size:13px;color:#51dcff;text-shadow:0 0 4px rgba(81,220,255,0.55);min-height:86px;display:flex;flex-direction:column;justify-content:space-between;letter-spacing:0.3px}
+.oled-row{min-height:16px;white-space:pre;overflow:hidden;text-overflow:ellipsis;transition:all 0.1s ease}
+
 /* ── LED Grid ── */
 .led-grid-wrap{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;padding:4px;background:var(--surface2);border-radius:var(--r-md)}
 .led-cell{aspect-ratio:1;border-radius:3px;background:#111;transition:background .1s;position:relative}
@@ -588,7 +680,6 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
 </head>
 <body>
 
-<!-- Topbar -->
 <div class="topbar">
   <div class="topbar-left">
     <span class="logo">♟ Chess Board</span>
@@ -601,10 +692,8 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
   </div>
 </div>
 
-<!-- Main layout -->
 <div class="main">
 
-  <!-- Board column -->
   <div>
     <div class="board-wrap">
       <div class="board-header">
@@ -612,7 +701,6 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
         <div style="font-size:12px;color:var(--text-dim)" id="mode-label">—</div>
       </div>
 
-      <!-- Setup overlay -->
       <div class="board-container" id="board-container">
         <div class="setup-panel" id="setup-panel">
           <div class="setup-title" id="setup-title">Select Game Mode</div>
@@ -633,19 +721,33 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
         <button class="ctrl-btn primary full" onclick="socket.emit('new_game')" id="new-game-btn">New Game</button>
       </div>
     </div>
+
+    <div class="diagnostics-row">
+      <div class="card" style="margin-bottom:0">
+        <div class="card-title">Live OLED Screen Mirror</div>
+        <div class="oled-screen-wrap" id="oled-screen">
+          <div class="oled-row" id="ol0"></div>
+          <div class="oled-row" id="ol1"></div>
+          <div class="oled-row" id="ol2"></div>
+          <div class="oled-row" id="ol3"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:0">
+        <div class="card-title">Live Board LEDs</div>
+        <div class="led-grid-wrap" id="led-grid"></div>
+      </div>
+    </div>
   </div>
 
-  <!-- Sidebar -->
   <div class="sidebar">
 
-    <!-- Status -->
     <div class="card">
       <div class="card-title">Status</div>
       <div class="status-text" id="status-text">Connecting...</div>
       <div class="eval-bar-wrap"><div class="eval-bar" id="eval-bar" style="width:50%"></div></div>
     </div>
 
-    <!-- Controls -->
     <div class="card">
       <div class="card-title">Controls</div>
       <div class="ctrl-grid">
@@ -662,13 +764,11 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
       <div id="usb-status" style="margin-top:8px;font-size:12px;color:var(--text-dim)">No USB drive detected</div>
     </div>
 
-    <!-- Move history -->
     <div class="card">
       <div class="card-title">Move History</div>
       <div class="history-list" id="history-list"></div>
     </div>
 
-    <!-- Theme -->
     <div class="card">
       <div class="card-title">Board Theme</div>
       <div class="theme-pills">
@@ -680,21 +780,66 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
       </div>
     </div>
 
-    <!-- LED Grid -->
-    <div class="card">
-      <div class="card-title">Live Board LEDs</div>
-      <div class="led-grid-wrap" id="led-grid"></div>
-    </div>
-
-    <!-- Easter egg hint -->
     <div class="disco-hint" onclick="triggerDisco()" title="🕺">✨ tap here for a surprise</div>
 
   </div>
 </div>
 
-<!-- ══ OVERLAYS ══ -->
+<div class="overlay" id="ov-theme">
+  <div class="modal" style="max-width: 460px;">
+    <button class="modal-close" onclick="closeOv('ov-theme')">✕</button>
+    <h2>🎨 Custom LED Theme Designer</h2>
+    
+    <div class="theme-note">
+      <strong>💡 Pro-Tip:</strong> Select your preferred base color. The smart board automatically calculates dark squares at 50% brightness to ensure a crisp, playable checkerboard pattern!
+    </div>
 
-<!-- PIN -->
+    <div class="theme-designer-grid">
+      <div class="picker-card" id="card-light" onclick="document.getElementById('c-light').click()">
+        <input type="color" id="c-light" value="#f0d9b5" oninput="updateCardFeedback('light', this.value)" onclick="event.stopPropagation()">
+        <div class="picker-info">
+          <span class="picker-label">Base Square</span>
+          <span class="picker-sub">Tap to choose</span>
+        </div>
+      </div>
+
+      <div class="picker-card" id="card-sel" onclick="document.getElementById('c-sel').click()">
+        <input type="color" id="c-sel" value="#aaeeff" oninput="updateCardFeedback('sel', this.value)" onclick="event.stopPropagation()">
+        <div class="picker-info">
+          <span class="picker-label">Selected Piece</span>
+          <span class="picker-sub">Active lift cells</span>
+        </div>
+      </div>
+
+      <div class="picker-card" id="card-move" onclick="document.getElementById('c-move').click()">
+        <input type="color" id="c-move" value="#e8e800" oninput="updateCardFeedback('move', this.value)" onclick="event.stopPropagation()">
+        <div class="picker-info">
+          <span class="picker-label">Last Move</span>
+          <span class="picker-sub">Trace pathway</span>
+        </div>
+      </div>
+
+      <div class="picker-card" id="card-hint" onclick="document.getElementById('c-hint').click()">
+        <input type="color" id="c-hint" value="#5588dd" oninput="updateCardFeedback('hint', this.value)" onclick="event.stopPropagation()">
+        <div class="picker-info">
+          <span class="picker-label">Tactical Hint</span>
+          <span class="picker-sub">Engine advice</span>
+        </div>
+      </div>
+
+      <div class="picker-card" id="card-legal" onclick="document.getElementById('c-legal').click()">
+        <input type="color" id="c-legal" value="#40a020" oninput="updateCardFeedback('legal', this.value)" onclick="event.stopPropagation()">
+        <div class="picker-info">
+          <span class="picker-label">Legal Dest</span>
+          <span class="picker-sub">Valid target squares</span>
+        </div>
+      </div>
+    </div>
+
+    <button class="ctrl-btn primary full" style="margin-top:20px" onclick="applyCustomTheme()">Apply Theme Settings</button>
+  </div>
+</div>
+
 <div class="overlay" id="ov-pin">
   <div class="pin-modal">
     <div class="pin-title">🔒 Dev Access</div>
@@ -720,7 +865,6 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
   </div>
 </div>
 
-<!-- Dev panel -->
 <div class="overlay" id="ov-dev">
   <div class="modal" style="max-width:500px">
     <button class="modal-close" onclick="closeOv('ov-dev')">✕</button>
@@ -769,24 +913,6 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
   </div>
 </div>
 
-<!-- Custom theme -->
-<div class="overlay" id="ov-theme">
-  <div class="modal">
-    <button class="modal-close" onclick="closeOv('ov-theme')">✕</button>
-    <h2>🎨 Custom Theme</h2>
-    <div class="colour-row">
-      <div class="colour-item"><input type="color" id="c-light" value="#f0d9b5"><span>Light sq</span></div>
-      <div class="colour-item"><input type="color" id="c-dark" value="#b58863"><span>Dark sq</span></div>
-      <div class="colour-item"><input type="color" id="c-sel" value="#aef"><span>Selected</span></div>
-      <div class="colour-item"><input type="color" id="c-move" value="#e8e800"><span>Last move</span></div>
-      <div class="colour-item"><input type="color" id="c-hint" value="#58d"><span>Hint</span></div>
-      <div class="colour-item"><input type="color" id="c-legal" value="#40a020"><span>Legal</span></div>
-    </div>
-    <button class="ctrl-btn primary full" style="margin-top:16px" onclick="applyCustomTheme()">Apply Theme</button>
-  </div>
-</div>
-
-<!-- About -->
 <div class="overlay" id="ov-about" onclick="closeOv('ov-about')">
   <div class="modal" style="text-align:center" onclick="event.stopPropagation()">
     <button class="modal-close" onclick="closeOv('ov-about')">✕</button>
@@ -823,7 +949,6 @@ let hintCount   = 0;
 let discoActive = false;
 let currentSliderPhase = 'difficulty';
 
-// ═══ THEMES ═══
 const THEMES = {
   classic:{ light:'#f0d9b5', dark:'#b58863', sel:'#aaeeff', move:'#e8e800', hint:'#5588dd', legal:'#40a020' },
   ocean:  { light:'#c9e8f0', dark:'#3a7fb5', sel:'#aaffdd', move:'#ffe040', hint:'#ff8040', legal:'#20c060' },
@@ -833,11 +958,39 @@ const THEMES = {
 let customTheme = null;
 let activeTheme = THEMES.classic;
 
-// ═══ SOCKET ═══
 socket.on('connect', () => {
   document.getElementById('conn-dot').classList.add('on');
 });
 socket.on('disconnect', ()=>{ document.getElementById('conn-dot').classList.remove('on'); });
+
+function updateCardFeedback(type, hexColor) {
+  const card = document.getElementById('card-' + type);
+  if (card) {
+    card.style.borderColor = hexColor;
+    card.style.boxShadow = `0 0 10px ${hexColor}40`;
+  }
+}
+
+function applyCustomTheme() {
+  const lightHex = document.getElementById('c-light').value;
+  const r = Math.floor(parseInt(lightHex.slice(1, 3), 16) / 2).toString(16).padStart(2, '0');
+  const g = Math.floor(parseInt(lightHex.slice(3, 5), 16) / 2).toString(16).padStart(2, '0');
+  const b = Math.floor(parseInt(lightHex.slice(5, 7), 16) / 2).toString(16).padStart(2, '0');
+  const darkHex = `#${r}${g}${b}`;
+
+  const ct = {
+    light: lightHex,
+    dark:  darkHex,
+    sel:   document.getElementById('c-sel').value,
+    move:  document.getElementById('c-move').value,
+    hint:  document.getElementById('c-hint').value,
+    legal: document.getElementById('c-legal').value,
+  };
+  
+  customTheme = ct;
+  socket.emit('set_custom_theme', ct);
+  closeOv('ov-theme');
+}
 
 socket.on('state_update', d => {
   currentFen  = d.fen;
@@ -848,9 +1001,7 @@ socket.on('state_update', d => {
   webPlayer   = d.web_player || null;
   discoActive = d.disco_active || false;
 
-  // Don't show turn during setup
-  const tbPhase = d.setup_phase || 'idle';
-  if (tbPhase !== 'idle' && tbPhase !== 'ready') {
+  if (d.setup_phase && d.setup_phase !== 'idle' && d.setup_phase !== 'ready') {
     document.getElementById('turn-badge').textContent = 'Setting up...';
   } else if (d.thinking) {
     document.getElementById('turn-badge').textContent = 'Thinking...';
@@ -873,12 +1024,30 @@ socket.on('state_update', d => {
   document.getElementById('voice-label').textContent =
     d.voice_enabled ? 'Announcements on' : 'Announcements off';
 
+  const canUseGameplayCtrls = d.game_active && (d.setup_phase === 'idle' || d.setup_phase === 'ready');
+  document.getElementById('undo-btn').style.display = canUseGameplayCtrls ? 'flex' : 'none';
+  document.getElementById('hint-btn').style.display = canUseGameplayCtrls ? 'flex' : 'none';
+
   syncThemes(d.theme);
   renderHistory(d.move_history || []);
   drawBoard();
   handleSetupPhase(d);
 
-  // Disco
+  if(d.oled_lines) updateOledMirror(d.oled_lines);
+
+  if (d.theme === 'custom' && d.custom_theme) {
+    customTheme = d.custom_theme;
+    syncThemes('custom');
+  }
+  
+  ['light', 'sel', 'move', 'hint', 'legal'].forEach(key => {
+    const input = document.getElementById('c-' + key);
+    if (input && activeTheme[key]) {
+      input.value = activeTheme[key];
+      updateCardFeedback(key, activeTheme[key]);
+    }
+  });
+
   document.getElementById('board-container').classList.toggle('disco-active', discoActive);
 });
 
@@ -896,6 +1065,9 @@ socket.on('dev_settings', d => {
     const el = document.getElementById('d-'+k);
     if (el) el.value = v;
   });
+  const el = document.getElementById('d-chess_led_brightness');
+  if (el && d.chess_led_brightness !== undefined)
+    el.dataset.origVal = String(d.chess_led_brightness);
 });
 
 socket.on('dev_settings_saved', d => {
@@ -910,14 +1082,9 @@ socket.on('dev_settings_saved', d => {
     setTimeout(() => msg.textContent = '', 3000);
   }
 });
-// Store original brightness when dev settings load
-socket.on('dev_settings', d => {
-  const el = document.getElementById('d-chess_led_brightness');
-  if (el && d.chess_led_brightness !== undefined)
-    el.dataset.origVal = String(d.chess_led_brightness);
-});
 
-// ═══ SETUP PHASE HANDLER ═══
+socket.on('oled_update', d => { if(d.lines) updateOledMirror(d.lines); });
+
 function handleSetupPhase(d) {
   const panel = document.getElementById('setup-panel');
   const phase = d.setup_phase || 'idle';
@@ -957,11 +1124,9 @@ function handleSetupPhase(d) {
     title.textContent = 'Set AI Difficulty';
     sub.textContent = 'Drag the slider (1 = easiest, 8 = hardest)';
     currentSliderPhase = 'difficulty';
-    currentSliderPhase = 'difficulty';
     slWrap.style.display = 'flex';
     slider.min = 1; slider.max = 8; slider.value = 1;
     slVal.textContent = '1';
-    // Send initial value so OLED shows 1 immediately
     socket.emit('slider_preview', {phase: 'difficulty', value: 1});
     slider.oninput = () => { slVal.textContent = slider.value; socket.emit('slider_preview', {phase: currentSliderPhase, value: parseInt(slider.value)}); };
   } else if (phase === 'time') {
@@ -1002,7 +1167,6 @@ function confirmSlider() {
   socket.emit('web_setup_answer', {value: v});
 }
 
-// ═══ BOARD DRAWING ═══
 const canvas = document.getElementById('board');
 const ctx    = canvas.getContext('2d');
 const SZ     = 60;
@@ -1076,7 +1240,6 @@ function drawBoard() {
         ctx.fillText(PIECES[pieces[sq]],   f*SZ+SZ/2, r*SZ+SZ/2);
       }
 
-      // Coords
       if (f===0) {
         ctx.fillStyle = isLight ? t.dark : t.light;
         ctx.font = '10px Google Sans,sans-serif';
@@ -1117,7 +1280,6 @@ canvas.addEventListener('click', e => {
   }
 });
 
-// ═══ MOVE HISTORY ═══
 function renderHistory(history) {
   const el = document.getElementById('history-list');
   el.innerHTML = '';
@@ -1135,7 +1297,6 @@ function renderHistory(history) {
   el.scrollTop = el.scrollHeight;
 }
 
-// ═══ THEMES ═══
 function setTheme(t) {
   socket.emit('set_theme', {theme: t});
 }
@@ -1146,21 +1307,32 @@ function syncThemes(t) {
     p.classList.toggle('active', p.dataset.t === t));
   drawBoard();
 }
-function applyCustomTheme() {
-  const ct = {
-    light: document.getElementById('c-light').value,
-    dark:  document.getElementById('c-dark').value,
-    sel:   document.getElementById('c-sel').value,
-    move:  document.getElementById('c-move').value,
-    hint:  document.getElementById('c-hint').value,
-    legal: document.getElementById('c-legal').value,
-  };
-  customTheme = ct;
-  socket.emit('set_custom_theme', ct);
-  closeOv('ov-theme');
+
+function updateOledMirror(lines) {
+  for(let i=0; i<4; i++) {
+    const el = document.getElementById('ol'+i);
+    if (!el) continue;
+    const txt = lines[i] !== undefined ? lines[i] : '';
+    el.textContent = txt;
+    
+    if (i === 0 && txt && !txt.startsWith(' ')) {
+      el.style.background = '#51dcff';
+      el.style.color = '#000000';
+      el.style.textShadow = 'none';
+      el.style.padding = '1px 4px';
+      el.style.borderRadius = '2px';
+      el.style.fontWeight = '600';
+    } else {
+      el.style.background = 'none';
+      el.style.color = '#51dcff';
+      el.style.textShadow = '0 0 4px rgba(81,220,255,0.55)';
+      el.style.padding = '0';
+      el.style.borderRadius = '0';
+      el.style.fontWeight = 'normal';
+    }
+  }
 }
 
-// ═══ PIN & DEV ═══
 let pinBuf='', devUnlocked=false;
 
 function openDev() {
@@ -1181,9 +1353,7 @@ function updPinDots() {
   }
 }
 function checkPin() {
-  // Fetch PIN from server via dev_settings
   socket.emit('get_dev_settings');
-  // We check after we get the response
   socket._pendingPinCheck = pinBuf;
 }
 
@@ -1199,7 +1369,6 @@ socket.on('dev_settings', d => {
     }
     socket._pendingPinCheck = undefined;
   }
-  // Always populate fields
   Object.entries(d).forEach(([k,v]) => {
     const el = document.getElementById('d-'+k);
     if (el) el.value = v;
@@ -1214,7 +1383,6 @@ function saveDevSettings() {
     'chess_led_brightness','startup_led_delay_s','button_debounce_s',
     'hint_dismiss_s','undo_max_half_moves','stockfish_path',
     'tts_rate','tts_volume','web_port','pgn_subdir','dev_pin'];
-  // Brightness caution popup
   const brightnessEl = document.getElementById('d-chess_led_brightness');
   if (brightnessEl && brightnessEl.dataset.origVal !== undefined &&
       brightnessEl.value !== brightnessEl.dataset.origVal) {
@@ -1236,20 +1404,17 @@ function saveDevSettings() {
   socket.emit('apply_dev_settings', payload);
 }
 
-// ═══ DISCO EASTER EGG ═══
 function triggerDisco() {
   socket.emit('disco');
 }
 
 socket.on('state_update', d => {
-  // Hint counter for physical hint button disco trigger
   if (d.hint_move && d.hint_move !== hintMove) {
     hintCount++;
     if (hintCount >= 10) { hintCount=0; triggerDisco(); }
   }
 });
 
-// ═══ HELPERS ═══
 function closeOv(id) { document.getElementById(id).classList.remove('show'); }
 function toggleTheme() {
   const html = document.documentElement;
@@ -1270,9 +1435,7 @@ document.addEventListener('keydown', e => {
 
 drawBoard();
 
-// ═══ STARTUP SPLASH ═══
 (function() {
-  // Inject splash overlay
   const splash = document.createElement('div');
   splash.id = 'splash';
   splash.innerHTML = `
@@ -1293,16 +1456,15 @@ drawBoard();
   document.body.appendChild(splash);
 
   const bar = () => document.getElementById('splash-bar');
-  const HOLD = __SPLASH_MS__;   // total hold time in ms
+  const HOLD = __SPLASH_MS__;   
   const START = Date.now();
 
-  // Smooth linear progress over the full hold period
   const iv = setInterval(() => {
     const elapsed = Date.now() - START;
     const pct = Math.min(100, (elapsed / HOLD) * 100);
     const b = bar(); if (b) b.style.width = pct + '%';
     if (pct >= 100) clearInterval(iv);
-  }, 30);  // update every 30ms for smooth animation
+  }, 30);  
 
   function hideSplash() {
     clearInterval(iv);
@@ -1313,14 +1475,12 @@ drawBoard();
     }, 100);
   }
 
-  // Hide after the full hold duration
   setTimeout(hideSplash, HOLD);
 })();
 
-// ═══ LED GRID ═══
+// ═══ LED GRID GENERATOR AND MANAGER ═══
 (function(){
   const grid = document.getElementById('led-grid');
-  // Create 64 cells
   for(let i=0;i<64;i++){
     const c=document.createElement('div');
     c.className='led-cell';

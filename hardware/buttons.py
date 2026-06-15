@@ -3,6 +3,7 @@
 # Author : Richard Pu
 # Created: 2026-06-10  |  Revised: 2026-06-14
 # Purpose: High-performance background-polling button driver for Jetson Orin Nano.
+#          Supports multi-key combination shortcuts via parallel matrix tracking.
 # =============================================================================
 
 from __future__ import annotations
@@ -138,6 +139,9 @@ class ButtonController:
         self._low_count:  dict = {c: 0  for c in all_cells}
         self._high_count: dict = {c: self.RELEASE_SAMPLES for c in all_cells}
         self._armed:      dict = {c: True  for c in all_cells}
+        
+        # Tracks real-time debounced holding state for each cross-point button
+        self._cell_held:  dict = {c: False for c in all_cells}
 
         self._hint_callback: Optional[Callable] = None
         self._last_hint_time = 0.0
@@ -147,7 +151,7 @@ class ButtonController:
         self._poll_thread = threading.Thread(target=self._master_poll_loop, daemon=True, name="button-poll")
         self._poll_thread.start()
 
-        log.info("ButtonController initialized with master polling thread.")
+        log.info("ButtonController initialized with multi-key matrix tracking.")
 
     def register_hint_callback(self, callback: Callable):
         self._hint_callback = callback
@@ -164,14 +168,15 @@ class ButtonController:
             return 0
 
     def _scan_once(self):
-        """Pass-through helper to maintain main game loop compatibility."""
         return self.detect_button_nowait()
 
     def is_ok_held(self) -> bool:
-        return self._is_cell_low(*MATRIX_MAP[9])
+        """Returns the high-speed debounced cached holding state of Button 9."""
+        return self._cell_held.get(MATRIX_MAP[9], False)
 
     def is_button8_held(self) -> bool:
-        return self._is_cell_low(*MATRIX_MAP[8])
+        """Returns the high-speed debounced cached holding state of Button 8."""
+        return self._cell_held.get(MATRIX_MAP[8], False)
 
     def cleanup(self):
         self._running = False
@@ -196,47 +201,64 @@ class ButtonController:
                 GPIO.output(row_pin, GPIO.HIGH)
             return None
 
-    def _is_cell_low(self, row_idx: int, col_idx: int, samples: int = 3) -> bool:
-        with self._lock:
-            row_pin = ROW_PINS[row_idx]
-            col_pin = COL_PINS[col_idx]
-            GPIO.output(row_pin, GPIO.LOW)
-            count = sum(1 for _ in range(samples) if GPIO.input(col_pin) == GPIO.LOW)
-            GPIO.output(row_pin, GPIO.HIGH)
-            return count >= samples
-
     def _master_poll_loop(self):
         all_cells = list(MATRIX_MAP.values()) + [HINT_POS]
         
         while self._running:
-            pressed_cell = self._scan_matrix()
+            # Step 1: Scan the ENTIRE grid in parallel without breaking early
+            current_states = {}
+            with self._lock:
+                for row_idx, row_pin in enumerate(ROW_PINS):
+                    GPIO.output(row_pin, GPIO.LOW)
+                    for col_idx, col_pin in enumerate(COL_PINS):
+                        current_states[(row_idx, col_idx)] = (GPIO.input(col_pin) == GPIO.LOW)
+                    GPIO.output(row_pin, GPIO.HIGH)
 
+            # Step 2: Debounce each button tracking status independently
             for cell in all_cells:
-                if pressed_cell == cell:
+                is_pressed = current_states.get(cell, False)
+
+                if is_pressed:
                     self._high_count[cell] = 0
                     if self._armed[cell]:
                         self._low_count[cell] += 1
                         if self._low_count[cell] >= self.CONFIRM_SAMPLES:
                             self._low_count[cell] = 0
                             self._armed[cell]     = False
+                            self._cell_held[cell] = True  # Latch as held
                             
                             btn = _CELL_TO_BTN.get(cell)
+                            
+                            # Step 3: Handle Double-Sided Combo Interception
                             if btn == "hint":
-                                now = time.time()
-                                if now - self._last_hint_time >= 0.2:
-                                    self._last_hint_time = now
+                                # If HINT is hit second, check if shortcuts are active
+                                if self._cell_held[MATRIX_MAP[8]] or self._cell_held[MATRIX_MAP[9]]:
                                     if self._hint_callback:
-                                        print(" [HARDWARE] HINT Button Triggered")
-                                        sys.stdout.flush()
                                         threading.Thread(target=self._hint_callback, args=(None,), daemon=True).start()
+                                else:
+                                    now = time.time()
+                                    if now - self._last_hint_time >= 0.2:
+                                        self._last_hint_time = now
+                                        if self._hint_callback:
+                                            print(" [HARDWARE] HINT Button Triggered")
+                                            sys.stdout.flush()
+                                            threading.Thread(target=self._hint_callback, args=(None,), daemon=True).start()
+                            
                             elif isinstance(btn, int):
-                                print(f" [HARDWARE] Button {btn} CAPTURED (Background Thread)")
-                                sys.stdout.flush()
-                                self._queue.put(btn)
+                                # If Button 8 or OK is hit second while HINT is already held down
+                                if self._cell_held[HINT_POS] and btn in (8, 9):
+                                    if self._hint_callback:
+                                        threading.Thread(target=self._hint_callback, args=(None,), daemon=True).start()
+                                else:
+                                    # Regular button press queue routing
+                                    print(f" [HARDWARE] Button {btn} CAPTURED (Background Thread)")
+                                    sys.stdout.flush()
+                                    self._queue.put(btn)
                 else:
                     self._low_count[cell] = 0
                     self._high_count[cell] += 1
                     if not self._armed[cell] and self._high_count[cell] >= self.RELEASE_SAMPLES:
                         self._armed[cell] = True
+                        self._cell_held[cell] = False  # Clear held latch
                         
             time.sleep(self.SAMPLE_INTERVAL_S)

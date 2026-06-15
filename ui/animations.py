@@ -75,17 +75,32 @@ class AnimationEngine:
     def set_theme(self, name_or_dict: Union[str, dict]):
         """
         Accept either a built-in theme name (str) or a custom theme dict.
+        Dynamically calculates dark squares at half-brightness for custom themes.
         """
+        # Fixed: Explicitly return a 3-element tuple literal to satisfy static type checkers
+        def hex_to_rgb(hex_str: str) -> tuple[int, int, int]:
+            h = hex_str.lstrip('#')
+            return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
         if isinstance(name_or_dict, dict):
             parsed = {}
             for key in ("light", "dark", "move", "hint"):
-                val = name_or_dict.get(key, THEMES["classic"][key])
+                val = name_or_dict.get(key)
+                if val is None:
+                    val = THEMES["classic"][key]
+                
                 if isinstance(val, str) and val.startswith("#"):
-                    val = _hex_to_rgb(val)
+                    val = hex_to_rgb(val)
+                
                 parsed[key] = tuple(val)
+            
+            # ── DYNAMIC HALF-BRIGHTNESS CONVERSION ──
+            l_r, l_g, l_b = parsed["light"]
+            parsed["dark"] = (l_r // 2, l_g // 2, l_b // 2)
+            
             self._theme_name = "custom"
             self._theme      = parsed
-            log.info("LED theme: custom")
+            log.info("LED theme: custom (dynamic half-brightness dark squares applied)")
         else:
             if name_or_dict not in THEMES:
                 log.warning(f"Unknown theme {name_or_dict!r}, using classic")
@@ -93,8 +108,9 @@ class AnimationEngine:
             self._theme_name = name_or_dict
             self._theme      = dict(THEMES[name_or_dict])
             log.info(f"LED theme: {name_or_dict}")
+            
         self.show_board_themed()
-
+        
     def get_theme_names(self) -> list:
         return list(THEMES.keys())
 
@@ -247,6 +263,19 @@ class AnimationEngine:
             self._bg_thread.join(timeout=1.0)
         # Automatically restore the basic board theme squares to clean the canvas
         self.show_board_themed()
+    
+    def stop_sleep_animation(self):
+        self._stop_bg.set()
+        if self._bg_thread:
+            self._bg_thread.join(timeout=1.0)
+        self.show_board_themed()
+
+    def start_sleep_animation(self):
+        self._stop_bg.clear()
+        self._bg_thread = threading.Thread(
+            target=self._sleep_loop, daemon=True, name="sleep-led-anim"
+        )
+        self._bg_thread.start()
 
     def _spinner_loop(self, color: Color):
         path = (
@@ -271,6 +300,33 @@ class AnimationEngine:
             self.leds.chess_show()
             pos = (pos + 1) % len(path)
             time.sleep(0.05)
+
+    def _sleep_loop(self):
+        """Mesmerizing, slow-shifting breathing wave pattern for sleep mode."""
+        step = 0
+        while not self._stop_bg.is_set():
+            # Smooth sine wave oscillation for brightness scaling
+            factor = (math.sin(step * 0.04) + 1) / 2
+            
+            for row in range(8):
+                for col in range(8):
+                    # Add a spatial layout offset to make the wave drift diagonally
+                    spatial_factor = (math.sin(step * 0.03 + (row + col) * 0.4) + 1) / 2
+                    
+                    # Compute deep space ambient palette (breathing deep purples and blues)
+                    r = int(15 * factor * spatial_factor)
+                    g = int(5 * (1 - factor) * spatial_factor)
+                    b = int(45 * factor + 15 * (1 - spatial_factor))
+                    
+                    self.leds.chess_set_pixel(col, row, (r, g, b))
+            
+            # Gently breathe the control panel LEDs in sync
+            cp_lum = int(25 * factor + 5)
+            self.leds.control_panel_fill((cp_lum, cp_lum, cp_lum), start=0, count=6)
+            
+            self.leds.chess_show()
+            step += 1
+            time.sleep(0.04)
 
     def _square_color(self, col: int, row: int) -> Color:
         is_light = (col + row) % 2 == 1

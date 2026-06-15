@@ -42,13 +42,24 @@ class StockfishEngine:
         """
         Returns (engine_move_uci, suggested_best_next_uci).
 
-        suggested_best_next is the engine's best response *after* its own move
-        (i.e. the hint for the human's next move).  Empty string if the game
-        is over (checkmate / stalemate).
+        Adjusts search limits dynamically for lower skill levels so the powerful
+        Jetson hardware doesn't over-calculate and override easy mode.
         """
         board = chess.Board(fen)
-        self._engine.configure({"Skill Level": max(0, min(20, skill_level))})
-        limit = chess.engine.Limit(time=movetime_ms / 1000.0)
+        skill_level = max(0, min(20, skill_level))
+        self._engine.configure({"Skill Level": skill_level})
+
+        # ── DYNAMIC LIMIT SCALING FOR JETSON ORIN NANO HARDWARE ──
+        if skill_level <= 4:
+            # Genuinely Easy Mode: Cap depth to 1-2 plies and restrict search time.
+            # This forces Stockfish to only look at immediate hanging pieces and make natural beginner blunders.
+            limit = chess.engine.Limit(time=min(0.15, movetime_ms / 1000.0), depth=max(1, skill_level // 2 + 1))
+        elif skill_level <= 10:
+            # Medium Mode: Introduce a moderate depth ceiling so it plays a balanced club-level game.
+            limit = chess.engine.Limit(time=movetime_ms / 1000.0, depth=skill_level)
+        else:
+            # Hard / Expert Mode: Full time limit, unlimited calculation depth for maximum strength.
+            limit = chess.engine.Limit(time=movetime_ms / 1000.0)
 
         result = self._engine.play(board, limit, info=chess.engine.INFO_ALL)
         engine_move = result.move.uci() if result.move else ""
@@ -57,8 +68,10 @@ class StockfishEngine:
         if result.move:
             board.push(result.move)
             if not board.is_game_over():
+                # Match hint complexity to the selected difficulty level
+                hint_time = 0.05 if skill_level <= 4 else 0.1
                 hint_result = self._engine.play(
-                    board, chess.engine.Limit(time=0.1)
+                    board, chess.engine.Limit(time=hint_time, depth=None if skill_level > 10 else skill_level)
                 )
                 suggested = hint_result.move.uci() if hint_result.move else ""
             board.pop()
@@ -66,15 +79,21 @@ class StockfishEngine:
         log.info(f"Stockfish: move={engine_move}  hint={suggested}")
         return engine_move, suggested
 
-    def evaluate(self, fen: str, time_s: float = 0.05) -> int:
+    def evaluate(self, fen: str, time_s: Optional[float] = None, depth: Optional[int] = 10) -> int:
         """
         Return the centipawn evaluation of the position from White's
-        perspective.  Uses the already-open engine — no second process.
+        perspective. Uses a deterministic depth limit or a standard time limit.
         Returns 0 on failure.
         """
         try:
             board = chess.Board(fen)
-            info  = self._engine.analyse(board, chess.engine.Limit(time=time_s))
+            # Use depth limiting if provided to prevent engine pipe timeouts
+            if depth is not None:
+                limit = chess.engine.Limit(depth=depth)
+            else:
+                limit = chess.engine.Limit(time=time_s if time_s is not None else 0.05)
+                
+            info  = self._engine.analyse(board, limit)
             score_obj = info.get("score")
             if score_obj is None:
                 return 0

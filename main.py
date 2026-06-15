@@ -112,7 +112,8 @@ class ChessGame:
         self.buttons.register_hint_callback(self._hint_isr)
 
     def run(self):
-        self.oled.show_idle()
+        self.oled.show_loading(0, 64)
+        
         self.display.show_opening_markings()
         self.anim.rain_effect(duration=2.0)
 
@@ -283,6 +284,38 @@ class ChessGame:
 
         if is_checkmate:
             self._end_game("Computer")
+            return
+
+        # ── NEW: WAIT FOR HUMAN CONFIRMATION BEFORE GIVING UP THE SCREEN ──
+        # Refresh the layout to print the exact move trail and prompt for acknowledgment
+        self.oled.show_game(
+            "Human",
+            last_move=engine_move,
+            move_history=self.board._move_history_uci(),
+            status=f"AI: {engine_move.upper()} - Press OK(9)"
+        )
+        
+        # Turn on the control panel indicator light for button 9
+        self.leds.control_panel_set_pixel(4, (255, 255, 255))
+        self.leds.panel_show()
+
+        # Flush any accidental intermediate buffer presses
+        while self.buttons.detect_button_nowait() != 0:
+            pass
+
+        # Await explicit confirmation click
+        while True:
+            if self._new_game_requested.is_set():
+                raise _NewGameException()
+            
+            btn = self.buttons.detect_button_nowait()
+            if btn == 9:
+                break
+            time.sleep(0.002)
+
+        # Clear control panel highlights and move downstream
+        self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
+        self.leds.panel_show()
 
     def _online_turn(self, humans_move: str):
         self.lichess.send_move(humans_move)
@@ -298,6 +331,32 @@ class ChessGame:
         if self._voice_enabled:
             voice.announce_move(opponent_move, captured=captured)
 
+        # ── NEW: WAIT FOR HUMAN CONFIRMATION ON ONLINE MOVES ──
+        self.oled.show_game(
+            "White" if self.colour_choice == "white" else "Black",
+            last_move=opponent_move,
+            move_history=self.board._move_history_uci(),
+            status=f"Net: {opponent_move.upper()} - Press OK(9)"
+        )
+        
+        self.leds.control_panel_set_pixel(4, (255, 255, 255))
+        self.leds.panel_show()
+
+        while self.buttons.detect_button_nowait() != 0:
+            pass
+
+        while True:
+            if self._new_game_requested.is_set():
+                raise _NewGameException()
+            
+            btn = self.buttons.detect_button_nowait()
+            if btn == 9:
+                break
+            time.sleep(0.002)
+
+        self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
+        self.leds.panel_show()
+
     def _choose_game_mode(self):
         log.info("Waiting for game mode selection...")
         self.oled.show_mode_select()
@@ -306,50 +365,81 @@ class ChessGame:
         web_server.update_state(setup_phase="mode_select")
 
         if self._voice_enabled:
-            voice.announce_status("Select game mode. Press 1 for AI, 2 for Lichess, 3 for local two player.")
+            threading.Thread(
+                target=voice.announce_status,
+                args=("Select game mode. Press 1 for AI, 2 for Lichess, 3 for local two player.",),
+                daemon=True
+            ).start()
 
-        _mode_result: list = []
-        _mode_done = threading.Event()
+        # Flush any lingering button events
+        while self.buttons.detect_button_nowait() != 0:
+            pass
 
-        def _btn_scan():
-            while not _mode_done.is_set():
-                btn = self.buttons.detect_button_nowait()
-                if btn in (1, 2, 3):
-                    _mode_result.append(btn)
-                    _mode_done.set()
-                    if not os.environ.get("MOCK_BUTTONS") == "1":
-                        while self.buttons._scan_matrix() is not None:
-                            time.sleep(0.01)
-                        time.sleep(0.3)
-                    return
-                time.sleep(0.01)
+        last_activity = time.time()
+        is_asleep = False
 
-        _scan_thread = threading.Thread(target=_btn_scan, daemon=True)
-        _scan_thread.start()
-
-        while not _mode_done.is_set():
-            if self._web_mode_event.wait(timeout=0.05):
+        while True:
+            # Check for physical matrix actions
+            btn = self.buttons.detect_button_nowait()
+            
+            # Check for remote web interface actions
+            web_triggered = False
+            if self._web_mode_event.is_set():
                 self._web_mode_event.clear()
                 if self._web_mode_queue:
-                    _mode_done.set()
-                    self._apply_web_mode(self._web_mode_queue.pop(0))
-                    break
-                continue
+                    web_triggered = True
 
-        if _mode_result:
-            btn = _mode_result[0]
-            if btn == 1:
-                self.game_mode = "Stockfish"
-                self._web_player = None
-                self.display.confirm_ai_mode()
-            elif btn == 2:
-                self.game_mode = "OnlineHuman"
-                self._web_player = None
-                self.display.confirm_online_mode()
-            elif btn == 3:
-                self.game_mode = "LocalHuman"
-                self._web_player = None
-                self.display.confirm_local_mode()
+            # If any interaction occurs, process wake rules or selection inputs
+            if btn != 0 or web_triggered:
+                last_activity = time.time()
+                
+                if is_asleep:
+                    print("[SYSTEM] Board activity detected. Waking up from sleep mode.")
+                    is_asleep = False
+                    self.anim.stop_sleep_animation()
+                    
+                    # Restore the interactive menu assets
+                    self.oled.show_mode_select()
+                    self.leds.control_panel_fill((255, 255, 255), start=0, count=5)
+                    self.leds.panel_show()
+                    
+                    # Consume the physical button press used to wake the board
+                    btn = 0 
+                    
+                    if web_triggered:
+                        self._apply_web_mode(self._web_mode_queue.pop(0))
+                        break
+                    continue
+                else:
+                    # Standard selection logic when awake
+                    if btn in (1, 2, 3):
+                        break
+                    if web_triggered:
+                        self._apply_web_mode(self._web_mode_queue.pop(0))
+                        break
+
+            # Inactivity timeout condition check
+            if not is_asleep and (time.time() - last_activity > CFG.menu_sleep_timeout_s):
+                print(f"[SYSTEM] Inactivity timeout ({CFG.menu_sleep_timeout_s}s) reached. Entering sleep mode.")
+                is_asleep = True
+                self.oled.show_menu_sleep()
+                self.anim.start_sleep_animation()
+
+            time.sleep(0.002)  # Maintain stable 500Hz cycle check speed
+
+        # Handle game mode configuration assignment once selection is confirmed
+        if btn == 1:
+            self.game_mode = "Stockfish"
+            self._web_player = None
+            self.display.confirm_ai_mode()
+        elif btn == 2:
+            self.game_mode = "OnlineHuman"
+            self._web_player = None
+            self.display.confirm_online_mode()
+        elif btn == 3:
+            self.game_mode = "LocalHuman"
+            self._web_player = None
+            self.display.confirm_local_mode()
 
         web_server.update_state(game_mode=self.game_mode, setup_phase="idle", web_player=self._web_player)
 
@@ -419,7 +509,7 @@ class ChessGame:
             self.oled.show_local_game_start()
             if self._web_player == "both":
                 web_server.update_state(setup_phase="idle")
-            time.sleep(1.5)
+            time.sleep(0.5)
 
         self.leds.control_panel_fill((10, 10, 10), start=6, count=16)
         self.leds.panel_show()
@@ -465,6 +555,29 @@ class ChessGame:
         self.anim.rainbow_victory(duration=2.0)
         self._save_to_usb()
 
+        # 1. Clear any accidental button clicks out of the queue buffer
+        while self.buttons.detect_button_nowait() != 0:
+            pass
+
+        # 2. Light up the OK button on the control panel to prompt the user
+        self.leds.control_panel_set_pixel(4, (255, 255, 255))
+        self.leds.panel_show()
+
+        # 3. Block indefinitely until the user acknowledges the end of the game
+        while True:
+            if self._new_game_requested.is_set():
+                break
+            btn = self.buttons.detect_button_nowait()
+            if btn == 9:
+                break
+            time.sleep(0.002)
+
+        self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
+        self.leds.panel_show()
+        
+        # 4. Throw the lifecycle exception to return straight to the main menu
+        raise _NewGameException()
+
     def _end_game(self, winner: str):
         self.oled.show_checkmate(winner)
         web_server.update_state(status=f"Checkmate! {winner} wins!", game_active=False)
@@ -472,6 +585,29 @@ class ChessGame:
         threading.Thread(target=self._run_analysis, daemon=True).start()
         self._save_to_usb()
 
+        # 1. Clear any accidental button clicks out of the queue buffer
+        while self.buttons.detect_button_nowait() != 0:
+            pass
+
+        # 2. Light up the OK button on the control panel to prompt the user
+        self.leds.control_panel_set_pixel(4, (255, 255, 255))
+        self.leds.panel_show()
+
+        # 3. Block indefinitely until the user acknowledges the end of the game
+        while True:
+            if self._new_game_requested.is_set():
+                break
+            btn = self.buttons.detect_button_nowait()
+            if btn == 9:
+                break
+            time.sleep(0.002)
+
+        self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
+        self.leds.panel_show()
+        
+        # 4. Throw the lifecycle exception to return straight to the main menu
+        raise _NewGameException()
+    
     def _run_analysis(self):
         history = self.board._move_history_uci()
         if len(history) < 4:
@@ -479,24 +615,30 @@ class ChessGame:
 
         blunders = []
         board = _chess.Board()
-        prev_score = self.stockfish.evaluate(board.fen())
+        # Initialize the baseline using a stable depth calculation
+        prev_score = self.stockfish.evaluate(board.fen(), depth=10)
 
         for uci in history:
             try:
+                # 1. Capture the exact FEN state BEFORE pushing the current move
+                fen_before = board.fen()
+                
                 move = _chess.Move.from_uci(uci)
                 board.push(move)
-                score = self.stockfish.evaluate(board.fen(), time_s=0.05)
+                
+                # Fetch centipawn score using depth-limited analysis
+                score = self.stockfish.evaluate(board.fen(), depth=10)
                 loss = prev_score - score  
                 if board.turn == _chess.WHITE:
                     loss = -loss  
+                
                 if loss > 100:
-                    brd_before = _chess.Board(board.fen())
-                    brd_before.pop()
-                    _, best = self.stockfish.get_move(brd_before.fen(), skill_level=20, movetime_ms=200)
+                    # 2. Pass the saved fen_before state directly to find the best alternative
+                    _, best = self.stockfish.get_move(fen_before, skill_level=20, movetime_ms=150)
                     blunders.append({"move": uci, "loss": int(loss), "best": best or "?"})
                 prev_score = score
-            except Exception:
-                pass
+            except Exception as e:
+                log.error(f"[ANALYSIS ERROR] Failed to parse move {uci}: {e}")
 
         blunders.sort(key=lambda x: x["loss"], reverse=True)
         top3 = blunders[:3]
@@ -703,25 +845,24 @@ class ChessGame:
         self._web_setup_event.clear()
         self._web_setup_answer = None
 
+        # Flush any stale button presses out of the queue buffer
+        while self.buttons.detect_button_nowait() != 0:
+            pass
+
         while True:
-            if self._web_setup_event.wait(timeout=0.03):
+            # 1. Scan web events instantly without forcing a 10ms-30ms sleep delay
+            if self._web_setup_event.is_set():
                 self._web_setup_event.clear()
                 return self._web_setup_answer
 
+            # 2. Grab physical button presses from the background queue instantly
             btn = self.buttons.detect_button_nowait()
             if btn == 9:
-                if not os.environ.get("MOCK_BUTTONS") == "1":
-                    while self.buttons._scan_matrix() is not None:
-                        time.sleep(0.01)
-                    time.sleep(0.3)  
                 return self._setup_preview_val or 4
             elif btn and btn != 0:
-                if not os.environ.get("MOCK_BUTTONS") == "1":
-                    while self.buttons._scan_matrix() is not None:
-                        time.sleep(0.01)
-                    time.sleep(0.3)  
                 return btn
-            time.sleep(0.02)
+
+            time.sleep(0.002)  # High-speed 500Hz polling rate
 
     def _disco_mode(self):
         import random
@@ -750,13 +891,31 @@ class ChessGame:
         return False
 
     def _hint_isr(self, channel):
+        # ── SHORTCUT 1: Safe OS Shutdown (Hold HINT + Button 8) ──
         if self.buttons and self.buttons.is_button8_held():
-            self._undo_sequence()
+            log.info("[SYSTEM] Safe shutdown shortcut combination detected.")
+            
+            # 1. Turn off all physical peripherals immediately for clear feedback
+            self.anim.stop_thinking_animation()
+            self.leds.all_off()
+            self.oled.clear()
+            
+            # 2. Run clean software object teardowns
+            self.buttons.cleanup()
+            self.stockfish.close()
+            
+            # 3. Issue the safe Linux halt command to protect the OS filesystem
+            os.system("sudo shutdown -h now")
+            sys.exit(0)
             return
+
+        # ── SHORTCUT 2: Reset / New Game (Hold HINT + OK / Button 9) ──
         if self.buttons and self.buttons.is_ok_held():
+            log.info("[SYSTEM] Reset / New Game shortcut combination detected.")
             self._new_game_requested.set()
             return
 
+        # ── Regular Single-Tap Hint Processing ──
         now = time.time()
         if now - self._last_hint_time_disco < 5.0:
             self._hint_count += 1
