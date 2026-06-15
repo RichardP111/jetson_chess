@@ -78,6 +78,8 @@ class ChessGame:
         self._new_game_requested = threading.Event()
         self._web_move_queue: list = []
         self._web_move_event  = threading.Event()
+        self._web_ok_event = threading.Event()
+        self._last_move_was_web = False
 
         self._web_setup_answer = None
         self._web_setup_event  = threading.Event()
@@ -103,6 +105,7 @@ class ChessGame:
             web_setup_answer = self._web_setup_received,
             slider_preview   = self._slider_preview,
             disco            = self._disco_mode,
+            web_ok           = self._web_ok_received,
         )
         web_server.start_server()
         web_server.update_state(voice_enabled=self._voice_enabled)
@@ -165,7 +168,14 @@ class ChessGame:
             if self.board.is_promotion(humans_move):
                 humans_move = self._ask_promotion(humans_move)
 
-            self.anim.move_trail(humans_move[:2], humans_move[2:4])
+            # ── FIX: FORCE LED FEEDBACK FOR ALL MOVES (PHYSICAL & WEB) ──
+            # This ensures web dashboard inputs physically light up the physical board matrix squares
+            from_sq = humans_move[:2]
+            to_sq = humans_move[2:4]
+            
+            # Clear previous highlights, paint the fading move trail animation, and mark destination
+            self.anim.show_board_themed()
+            self.anim.move_trail(from_sq, to_sq)
             self.display.light_up_move(humans_move, mode="Y")
 
             legal = self._check_move_legal(humans_move)
@@ -286,36 +296,39 @@ class ChessGame:
             self._end_game("Computer")
             return
 
-        # ── NEW: WAIT FOR HUMAN CONFIRMATION BEFORE GIVING UP THE SCREEN ──
-        # Refresh the layout to print the exact move trail and prompt for acknowledgment
-        self.oled.show_game(
-            "Human",
-            last_move=engine_move,
-            move_history=self.board._move_history_uci(),
-            status=f"AI: {engine_move.upper()} - Press OK(9)"
-        )
-        
-        # Turn on the control panel indicator light for button 9
-        self.leds.control_panel_set_pixel(4, (255, 255, 255))
-        self.leds.panel_show()
-
-        # Flush any accidental intermediate buffer presses
-        while self.buttons.detect_button_nowait() != 0:
-            pass
-
-        # Await explicit confirmation click
-        while True:
-            if self._new_game_requested.is_set():
-                raise _NewGameException()
+        # ── FIX: BYPASS CONFIRMATION IF THE MOVE ORIGINATED FROM THE WEB ──
+        if self._last_move_was_web:
+            log.info(f"[SYSTEM] AI moved {engine_move.upper()}. Bypassing confirmation loop for web player.")
+        else:
+            # Refresh the layout to print the exact move trail and prompt for acknowledgment
+            self.oled.show_game(
+                "Human",
+                last_move=engine_move,
+                move_history=self.board._move_history_uci(),
+                status=f"AI: {engine_move.upper()} - Press OK(9)"
+            )
             
-            btn = self.buttons.detect_button_nowait()
-            if btn == 9:
-                break
-            time.sleep(0.002)
+            # Turn on the control panel indicator light for button 9
+            self.leds.control_panel_set_pixel(4, (255, 255, 255))
+            self.leds.panel_show()
 
-        # Clear control panel highlights and move downstream
-        self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
-        self.leds.panel_show()
+            # Flush any accidental intermediate buffer presses
+            while self.buttons.detect_button_nowait() != 0:
+                pass
+
+            # Await explicit confirmation click from physical hardware
+            while True:
+                if self._new_game_requested.is_set():
+                    raise _NewGameException()
+                
+                btn = self.buttons.detect_button_nowait()
+                if btn == 9:
+                    break
+                time.sleep(0.002)
+
+            # Clear control panel highlights and move downstream
+            self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
+            self.leds.panel_show()
 
     def _online_turn(self, humans_move: str):
         self.lichess.send_move(humans_move)
@@ -331,31 +344,35 @@ class ChessGame:
         if self._voice_enabled:
             voice.announce_move(opponent_move, captured=captured)
 
-        # ── NEW: WAIT FOR HUMAN CONFIRMATION ON ONLINE MOVES ──
-        self.oled.show_game(
-            "White" if self.colour_choice == "white" else "Black",
-            last_move=opponent_move,
-            move_history=self.board._move_history_uci(),
-            status=f"Net: {opponent_move.upper()} - Press OK(9)"
-        )
-        
-        self.leds.control_panel_set_pixel(4, (255, 255, 255))
-        self.leds.panel_show()
-
-        while self.buttons.detect_button_nowait() != 0:
-            pass
-
-        while True:
-            if self._new_game_requested.is_set():
-                raise _NewGameException()
+        # ── FIX: BYPASS CONFIRMATION IF THE MOVE ORIGINATED FROM THE WEB ──
+        if self._last_move_was_web:
+            log.info(f"[SYSTEM] Opponent moved {opponent_move.upper()}. Bypassing confirmation loop for web player.")
+        else:
+            current_human_turn = "White" if self.colour_choice == "white" else "Black"
+            self.oled.show_game(
+                current_human_turn,
+                last_move=opponent_move,
+                move_history=self.board._move_history_uci(),
+                status=f"Net: {opponent_move.upper()} - Press OK(9)"
+            )
             
-            btn = self.buttons.detect_button_nowait()
-            if btn == 9:
-                break
-            time.sleep(0.002)
+            self.leds.control_panel_set_pixel(4, (255, 255, 255))
+            self.leds.panel_show()
 
-        self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
-        self.leds.panel_show()
+            while self.buttons.detect_button_nowait() != 0:
+                pass
+
+            while True:
+                if self._new_game_requested.is_set():
+                    raise _NewGameException()
+                
+                btn = self.buttons.detect_button_nowait()
+                if btn == 9:
+                    break
+                time.sleep(0.002)
+
+            self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
+            self.leds.panel_show()
 
     def _choose_game_mode(self):
         log.info("Waiting for game mode selection...")
@@ -465,12 +482,19 @@ class ChessGame:
         self.leds.panel_show()
 
         if self.game_mode == "Stockfish":
-            self.oled.show_setup_difficulty()
+            # ── DIFFICULTY SELECTION ──
+            def refresh_difficulty():
+                self.leds.control_panel_fill((255, 255, 255), start=0, count=4)
+                self.leds.panel_show()
+                self.display.show_difficulty_icon()
+                self.oled.show_setup_difficulty(self._setup_preview_val if self._setup_preview_val else 1)
+
             self.display.show_difficulty_icon()
             web_server.update_state(setup_phase="difficulty", difficulty=CFG.difficulty_default)
-            self._setup_preview_val = 1  
-            self.oled.show_setup_difficulty(1)  
-            ans = self._wait_setup_answer(phase="difficulty")
+            self._setup_preview_val = 1 
+            self.oled.show_setup_difficulty(1) 
+            
+            ans = self._wait_for_hardware_or_web_with_sleep(phase="difficulty", refresh_callback=refresh_difficulty)
             ans_int = int(ans) if ans else CFG.difficulty_default
             if ans_int <= 8:
                 self.difficulty = self._map_range(ans_int, 1, 8, CFG.difficulty_min, CFG.difficulty_max)
@@ -480,27 +504,49 @@ class ChessGame:
             self.oled.show_setup_difficulty(self.difficulty)
             web_server.update_state(difficulty=self.difficulty, setup_phase="time")
 
-            self.oled.show_setup_timeout()
+            # ── TIME SELECTION ──
+            def refresh_time():
+                self.leds.control_panel_fill((255, 255, 255), start=0, count=4)
+                self.leds.panel_show()
+                self.display.show_timeout_icon()
+                TIME_OPTIONS = [1, 2, 3, 5, 8, 12, 20, 30]
+                secs = TIME_OPTIONS[min(self._setup_preview_val - 1, 7)]
+                self.oled.show_setup_timeout(secs * 1000)
+
             self.display.show_timeout_icon()
             self._setup_preview_val = 5
-            ans = self._wait_setup_answer(phase="time")
+            self.oled.show_setup_timeout(5000) # Preview default index 5 maps to 5000ms
+            
+            ans = self._wait_for_hardware_or_web_with_sleep(phase="time", refresh_callback=refresh_time)
             TIME_MS = [1000, 2000, 3000, 5000, 8000, 12000, 20000, 30000]
             idx = max(1, min(8, int(ans) if ans else 5))
             self.move_timeout_ms = TIME_MS[idx - 1]
             self.oled.show_setup_timeout(self.move_timeout_ms)
             web_server.update_state(setup_phase="idle")
 
+            # ── WEB COLOUR SELECTION ──
             if self._web_player:
+                def refresh_web_colour():
+                    self.leds.control_panel_fill((255, 255, 255), start=0, count=4)
+                    self.leds.panel_show()
+                    # Keep previous state visible on OLED
                 web_server.update_state(setup_phase="web_colour")
-                ans = self._wait_setup_answer()
+                ans = self._wait_for_hardware_or_web_with_sleep(phase="web_colour", refresh_callback=refresh_web_colour)
                 self._web_player = str(ans) if ans else "White"
                 web_server.update_state(setup_phase="idle", web_player=self._web_player)
 
         elif self.game_mode == "OnlineHuman":
+            # ── ONLINE COLOUR SELECTION ──
+            def refresh_online_colour():
+                self.leds.control_panel_fill((255, 255, 255), start=0, count=4)
+                self.leds.panel_show()
+                self.display.show_colour_choice_icon()
+                self.oled.show_setup_colour()
+
             self.oled.show_setup_colour()
             self.display.show_colour_choice_icon()
             web_server.update_state(setup_phase="colour")
-            ans = self._wait_setup_answer()
+            ans = self._wait_for_hardware_or_web_with_sleep(phase="colour", refresh_callback=refresh_online_colour)
             self.colour_choice = ans if ans in ("white", "black") else "white"
             web_server.update_state(setup_phase="idle")
             self.lichess.start_game(self.colour_choice)
@@ -555,27 +601,21 @@ class ChessGame:
         self.anim.rainbow_victory(duration=2.0)
         self._save_to_usb()
 
-        # 1. Clear any accidental button clicks out of the queue buffer
-        while self.buttons.detect_button_nowait() != 0:
-            pass
+        def refresh_draw_screen():
+            self.oled.show_draw(reason)
+            self.leds.control_panel_set_pixel(4, (255, 255, 255))
+            self.leds.panel_show()
 
-        # 2. Light up the OK button on the control panel to prompt the user
+        # Light up the OK button on the control panel to prompt the user
         self.leds.control_panel_set_pixel(4, (255, 255, 255))
         self.leds.panel_show()
 
-        # 3. Block indefinitely until the user acknowledges the end of the game
-        while True:
-            if self._new_game_requested.is_set():
-                break
-            btn = self.buttons.detect_button_nowait()
-            if btn == 9:
-                break
-            time.sleep(0.002)
+        # Use the sleep-aware helper to block until OK (Button 9) is clicked
+        self._wait_for_hardware_or_web_with_sleep(phase="game_over", refresh_callback=refresh_draw_screen)
 
         self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
         self.leds.panel_show()
         
-        # 4. Throw the lifecycle exception to return straight to the main menu
         raise _NewGameException()
 
     def _end_game(self, winner: str):
@@ -585,27 +625,21 @@ class ChessGame:
         threading.Thread(target=self._run_analysis, daemon=True).start()
         self._save_to_usb()
 
-        # 1. Clear any accidental button clicks out of the queue buffer
-        while self.buttons.detect_button_nowait() != 0:
-            pass
+        def refresh_checkmate_screen():
+            self.oled.show_checkmate(winner)
+            self.leds.control_panel_set_pixel(4, (255, 255, 255))
+            self.leds.panel_show()
 
-        # 2. Light up the OK button on the control panel to prompt the user
+        # Light up the OK button on the control panel to prompt the user
         self.leds.control_panel_set_pixel(4, (255, 255, 255))
         self.leds.panel_show()
 
-        # 3. Block indefinitely until the user acknowledges the end of the game
-        while True:
-            if self._new_game_requested.is_set():
-                break
-            btn = self.buttons.detect_button_nowait()
-            if btn == 9:
-                break
-            time.sleep(0.002)
+        # Use the sleep-aware helper to block until OK (Button 9) is clicked
+        self._wait_for_hardware_or_web_with_sleep(phase="game_over", refresh_callback=refresh_checkmate_screen)
 
         self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
         self.leds.panel_show()
         
-        # 4. Throw the lifecycle exception to return straight to the main menu
         raise _NewGameException()
     
     def _run_analysis(self):
@@ -754,9 +788,9 @@ class ChessGame:
                         return self._web_move_queue.pop(0)
                 
                 raw = self.buttons._scan_once()
-                # Ensure we only pick up physical digit buttons (ignoring background 'hint' flags)
                 if isinstance(raw, int) and raw != 0:
                     btn = raw
+                    self._last_move_was_web = False  # Physical button pressed; reset flag
                     break
                     
                 if self._new_game_requested.is_set():
@@ -821,6 +855,7 @@ class ChessGame:
         return column + row
 
     def _web_move_received(self, uci: str):
+        self._last_move_was_web = True  # Flag that this round is web-driven
         self._web_move_queue.append(uci)
         self._web_move_event.set()
 
@@ -840,6 +875,66 @@ class ChessGame:
     def _web_setup_received(self, value):
         self._web_setup_answer = value
         self._web_setup_event.set()
+
+    def _wait_for_hardware_or_web_with_sleep(self, phase: str, refresh_callback) -> Any:
+        # Flush any stale inputs before entering the wait loop
+        while self.buttons.detect_button_nowait() != 0:
+            pass
+
+        self._web_setup_event.clear()
+        self._web_setup_answer = None
+        
+        last_activity = time.time()
+        is_asleep = False
+
+        while True:
+            # 1. Check physical matrix action
+            btn = self.buttons.detect_button_nowait()
+            
+            # 2. Check remote web interface action
+            web_triggered = False
+            if self._web_setup_event.is_set():
+                self._web_setup_event.clear()
+                web_triggered = True
+
+            # If any action occurs, handle wake rules or return the captured values
+            if btn != 0 or web_triggered:
+                last_activity = time.time()
+                
+                if is_asleep:
+                    print(f"[SYSTEM] Board activity detected. Waking up from phase: {phase}")
+                    is_asleep = False
+                    self.anim.stop_sleep_animation()
+                    
+                    # Call the callback to restore the specific menu/screen UI assets
+                    refresh_callback()
+                    
+                    # Consume the physical button press used to wake the board
+                    btn = 0 
+                    continue
+                else:
+                    # Awake and received input: evaluate what to return
+                    if web_triggered:
+                        return self._web_setup_answer
+                    if btn != 0:
+                        # If we are waiting for a game-over acknowledgment, look for OK (Button 9)
+                        if phase == "game_over":
+                            if btn == 9:
+                                return btn
+                        else:
+                            # Standard setup logic: Button 9 means submit preview, others return raw digit
+                            if btn == 9:
+                                return self._setup_preview_val or 4
+                            return btn
+
+            # 3. Inactivity timeout condition check
+            if not is_asleep and (time.time() - last_activity > CFG.menu_sleep_timeout_s):
+                print(f"[SYSTEM] Inactivity timeout reached in phase '{phase}'. Entering sleep mode.")
+                is_asleep = True
+                self.oled.show_menu_sleep()
+                self.anim.start_sleep_animation()
+
+            time.sleep(0.002)  # Maintain stable 500Hz cycle check speed
 
     def _wait_setup_answer(self, phase: str = "") -> Any:
         self._web_setup_event.clear()
@@ -989,6 +1084,10 @@ class ChessGame:
             fen=self.board.fen(), move_history=history, whose_turn=whose,
             last_move=uci, status=f"{player}: {uci}", eval_score=eval_score
         )
+
+    def _web_ok_received(self):
+        log.info("Confirmation 'OK' received from web dashboard")
+        self._web_ok_event.set()
 
     @staticmethod
     def _get_local_ip() -> str:

@@ -321,9 +321,16 @@ def on_move_input(data):
         emit("move_rejected", {"reason": "Too short"})
         return
     log.info(f"Move input from dashboard: {uci}")
+    
     if _callbacks["move_input"]:
         threading.Thread(target=_callbacks["move_input"],
                          args=(uci,), daemon=True).start()
+                         
+    # ── ADD THIS CHANGE HERE ──
+    # Automatically trip the OK confirmation flag to prevent the backend 
+    # game loop from waiting for a physical Button 9 press.
+    if "web_ok" in _callbacks and _callbacks["web_ok"]:
+        _callbacks["web_ok"]()
 
 @socketio.on("web_mode_select")
 def on_web_mode_select(data):
