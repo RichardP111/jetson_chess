@@ -1,0 +1,27 @@
+# scripts/99-chess-usb.rules
+# Jetson Smart Chess Board — USB hotplug auto-mount
+#
+# Install:
+#   sudo cp scripts/99-chess-usb.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+
+# ── Mount on plug-in ─────────────────────────────────────────────────────────
+# Match on ENV variables set by udev (not SUBSYSTEMS= parent walk).
+# ID_BUS=="usb" is present in the fully-enriched UDEV event for this Jetson.
+# GOTO skips the unmount rules so they don't accidentally fire on add.
+
+ACTION=="add",    SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{DEVTYPE}=="partition", \
+    ENV{ID_FS_TYPE}!="", \
+    RUN+="/usr/local/bin/chess-usb-mount.sh mount $env{DEVNAME}"
+
+# Whole-disk (no partition table) — less common but cover it
+ACTION=="add",    SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{DEVTYPE}=="disk", \
+    ENV{ID_FS_TYPE}!="", \
+    RUN+="/usr/local/bin/chess-usb-mount.sh mount $env{DEVNAME}"
+
+# ── Unmount on remove ─────────────────────────────────────────────────────────
+ACTION=="remove", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{DEVTYPE}=="partition", \
+    RUN+="/usr/local/bin/chess-usb-mount.sh unmount $env{DEVNAME}"
+
+ACTION=="remove", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{DEVTYPE}=="disk", \
+    RUN+="/usr/local/bin/chess-usb-mount.sh unmount $env{DEVNAME}"

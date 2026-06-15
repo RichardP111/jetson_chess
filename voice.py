@@ -79,9 +79,21 @@ def _has_audio_device() -> bool:
     try:
         result = subprocess.run(["aplay", "-l"],
                                 capture_output=True, text=True, timeout=2)
-        return "card" in result.stdout
-    except Exception:
-        return False
+        has_card = "card" in result.stdout
+        if has_card:
+            log.info(f"Audio devices found:\n{result.stdout.strip()}")
+        return has_card
+    except Exception as e:
+        log.warning(f"aplay -l failed: {e}")
+        # Fallback: check /proc/asound directly
+        try:
+            import os
+            cards = os.listdir("/proc/asound")
+            has_pcm = any(c.startswith("card") for c in cards)
+            log.info(f"ALSA cards via /proc/asound: {cards}")
+            return has_pcm
+        except Exception:
+            return False
 
 
 # ── Voice engine ──────────────────────────────────────────────────────────────
@@ -131,6 +143,34 @@ class VoiceEngine:
     @property
     def available(self) -> bool:
         return self._backend != "none"
+
+    def recheck_audio(self) -> bool:
+        """
+        Re-probe for audio hardware. Call after a USB speaker is plugged in.
+        Returns True if voice became newly available.
+        """
+        if self._backend != "none":
+            return False  # already active
+        if _DISABLE or _MOCK:
+            return False
+        if not _has_audio_device():
+            return False
+        if _has_espeak():
+            self._backend = "espeak"
+        else:
+            try:
+                import pyttsx3
+                self._pyttsx3_engine = pyttsx3.init()
+                self._pyttsx3_engine.setProperty("rate",   CFG.tts_rate)
+                self._pyttsx3_engine.setProperty("volume", CFG.tts_volume)
+                self._backend = "pyttsx3"
+            except Exception as e:
+                log.warning(f"pyttsx3 init failed on recheck: {e}")
+                return False
+        log.info(f"Voice backend activated on recheck: {self._backend}")
+        self._thread = threading.Thread(target=self._worker, daemon=True, name="voice-worker")
+        self._thread.start()
+        return True
 
     def say(self, text: str):
         """Queue a phrase for async speech. Returns immediately."""

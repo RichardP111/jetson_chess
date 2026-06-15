@@ -289,3 +289,12 @@ class LEDController:
         self.chess_fill((0, 0, 0))
         self.control_panel_fill((0, 0, 0))
         self.show_all()
+
+    def set_chess_brightness(self, brightness: int):
+        """Update LED brightness live and repaint the board. Called from dev settings."""
+        brightness = max(0, min(255, brightness))
+        CFG.chess_led_brightness = brightness
+        self.chess.setBrightness(brightness)
+        # Repaint immediately so the user sees the change
+        self.chess.show()
+        log.info(f"LED brightness updated live to {brightness}")

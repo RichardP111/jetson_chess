@@ -30,7 +30,7 @@ from ui.display import Display
 from ui.animations import AnimationEngine
 from oled.oled_display import OLEDDisplay
 from voice import voice
-from usb_storage import usb
+from storage import usb
 import web.server as web_server
 
 logging.basicConfig(
@@ -94,19 +94,23 @@ class ChessGame:
         self._last_hint_time_disco = 0.0
 
         web_server.register_callbacks(
-            new_game         = self._new_game_sequence,
-            hint             = lambda: self._hint_isr(None),
-            set_theme        = self.anim.set_theme,
-            move_input       = self._web_move_received,
-            undo             = self._undo_sequence,
-            save_usb         = self._save_to_usb,
-            toggle_voice     = self._toggle_voice,
-            web_mode_select  = self._web_mode_received,
-            web_setup_answer = self._web_setup_received,
-            slider_preview   = self._slider_preview,
-            disco            = self._disco_mode,
-            web_ok           = self._web_ok_received,
-            load_usb_game    = self._load_game_from_usb,
+            new_game           = self._new_game_sequence,
+            hint               = lambda: self._hint_isr(None),
+            set_theme          = self.anim.set_theme,
+            move_input         = self._web_move_received,
+            undo               = self._undo_sequence,
+            save_usb           = self._save_to_usb,
+            toggle_voice       = self._toggle_voice,
+            web_mode_select    = self._web_mode_received,
+            web_setup_answer   = self._web_setup_received,
+            slider_preview     = self._slider_preview,
+            disco              = self._disco_mode,
+            web_ok             = self._web_ok_received,
+            load_usb_game      = self._load_game_from_usb,
+            set_brightness     = self._set_brightness_live,
+            viewer_board_reset = self._viewer_board_reset,
+            viewer_board_goto  = self._viewer_board_goto,
+            evaluate_fen       = lambda fen: self.stockfish.evaluate(fen, depth=10),
         )
         web_server.start_server()
         web_server.update_state(voice_enabled=self._voice_enabled)
@@ -114,6 +118,33 @@ class ChessGame:
         signal.signal(signal.SIGINT,  self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
         self.buttons.register_hint_callback(self._hint_isr)
+
+        # ── Background USB hot-plug monitor ──────────────────────────────────
+        def _usb_monitor():
+            prev = None
+            while True:
+                cur = usb.is_available()
+                if cur != prev:
+                    prev = cur
+                    games = usb.list_saved_games() if cur else []
+                    # Single emission — both flags land in the same socket push
+                    web_server.update_state(usb_available=cur, usb_games=games)
+                    log.info(f"USB drive {'connected' if cur else 'disconnected'} — {len(games)} game(s)")
+                # Recheck for USB speaker plugged in after boot
+                if not voice.available:
+                    if voice.recheck_audio():
+                        self._voice_enabled = True
+                        web_server.update_state(voice_enabled=True)
+                        log.info("USB speaker detected — voice enabled")
+                time.sleep(2.0)   # 2s instead of 3s for snappier detection
+
+        # Run one check immediately so dashboard is correct on first connect
+        _initial_usb = usb.is_available()
+        web_server.update_state(
+            usb_available=_initial_usb,
+            usb_games=usb.list_saved_games() if _initial_usb else [],
+        )
+        threading.Thread(target=_usb_monitor, daemon=True, name="usb-monitor").start()
 
     def run(self):
         self.oled.show_loading(0, 64)
@@ -141,7 +172,11 @@ class ChessGame:
             self.oled.show_loading(i + 1, 64)
             time.sleep(CFG.startup_led_delay_s)
 
-        self.oled.show_network_info(self._get_local_ip())
+        ip = self._get_local_ip()
+        if ip:
+            self.oled.show_network_info(ip)
+        else:
+            self.oled.show_status("No network — offline mode")
         time.sleep(2.0)
         self._choose_game_mode()
         self._setup_game()
@@ -275,7 +310,6 @@ class ChessGame:
         log.info(f"Engine move: {engine_move}")
 
         self.board.apply_move(engine_move)
-        self._push_move_to_ui(engine_move, "Computer")
 
         cb_after = _chess.Board(self.board.fen())
         is_check = cb_after.is_check()
@@ -286,94 +320,132 @@ class ChessGame:
                                 is_check=is_check and not is_checkmate,
                                 is_checkmate=is_checkmate)
 
-        if is_check and not is_checkmate:
+        if is_checkmate:
+            self._push_move_to_ui(engine_move, "Computer")
+            self._end_game("Computer")
+            return
+
+        # ── Push move data to UI (no needs_ok here — sent separately below) ──
+        ok_status = f"AI played {engine_move.upper()}"
+        if is_check:
+            ok_status = f"CHECK! AI played {engine_move.upper()}"
+        history    = self.board._move_history_uci()
+        whose      = self._current_turn()
+        eval_score = self.stockfish.evaluate(self.board.fen())
+        self.oled.push_move(engine_move, whose, eval_score=eval_score)
+        web_server.update_state(
+            fen=self.board.fen(), move_history=history, whose_turn=whose,
+            last_move=engine_move, status=ok_status, eval_score=eval_score,
+        )
+
+        if is_check:
             king_sq = cb_after.king(cb_after.turn)
             if king_sq is not None:
                 self.anim.check_alert(king_sq % 8, 7 - (king_sq // 8))
             self.oled.show_status("CHECK!")
-            web_server.update_state(status="CHECK!")
 
-        if is_checkmate:
-            self._end_game("Computer")
-            return
+        # ── CONFIRMATION: show OK banner via dedicated direct emit (no race) ──
+        self.oled.show_game(
+            "Human",
+            last_move=engine_move,
+            move_history=history,
+            status=f"AI: {engine_move.upper()} — OK to continue"
+        )
+        self.leds.control_panel_set_pixel(4, (255, 255, 255))
+        self.leds.panel_show()
+        web_server.show_ok_banner(engine_move.upper())
 
-        # ── FIX: BYPASS CONFIRMATION IF THE MOVE ORIGINATED FROM THE WEB ──
-        if self._last_move_was_web:
-            log.info(f"[SYSTEM] AI moved {engine_move.upper()}. Bypassing confirmation loop for web player.")
-        else:
-            # Refresh the layout to print the exact move trail and prompt for acknowledgment
-            self.oled.show_game(
-                "Human",
-                last_move=engine_move,
-                move_history=self.board._move_history_uci(),
-                status=f"AI: {engine_move.upper()} - Press OK(9)"
-            )
-            
-            # Turn on the control panel indicator light for button 9
-            self.leds.control_panel_set_pixel(4, (255, 255, 255))
-            self.leds.panel_show()
+        # Clear stale events before waiting
+        self._web_ok_event.clear()
+        while self.buttons.detect_button_nowait() != 0:
+            pass
 
-            # Flush any accidental intermediate buffer presses
-            while self.buttons.detect_button_nowait() != 0:
-                pass
+        while True:
+            if self._new_game_requested.is_set():
+                web_server.hide_ok_banner()
+                raise _NewGameException()
+            if self._web_ok_event.is_set():
+                self._web_ok_event.clear()
+                break
+            if self._web_move_event.is_set():
+                break
+            btn = self.buttons.detect_button_nowait()
+            if btn == 9:
+                break
+            time.sleep(0.002)
 
-            # Await explicit confirmation click from physical hardware
-            while True:
-                if self._new_game_requested.is_set():
-                    raise _NewGameException()
-                
-                btn = self.buttons.detect_button_nowait()
-                if btn == 9:
-                    break
-                time.sleep(0.002)
-
-            # Clear control panel highlights and move downstream
-            self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
-            self.leds.panel_show()
+        web_server.hide_ok_banner()
+        self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
+        self.leds.panel_show()
+        self._last_move_was_web = False
 
     def _online_turn(self, humans_move: str):
-        self.lichess.send_move(humans_move)
+        try:
+            self.lichess.send_move(humans_move)
+        except Exception as e:
+            log.error(f"Lichess send_move failed: {e}")
         self.oled.show_status("Waiting for opponent...")
         web_server.update_state(status="Waiting for opponent...")
         opponent_move = self.lichess.wait_for_move()
+        if not opponent_move or len(opponent_move) < 4:
+            log.error(f"Invalid opponent move received: {opponent_move!r} — likely network loss")
+            self.oled.show_status("Connection lost — ending game")
+            web_server.update_state(status="Network lost — game ended")
+            time.sleep(3.0)
+            raise _NewGameException()
         log.info(f"Online opponent move: {opponent_move}")
         captured = self.board.is_capture(opponent_move)
         self.anim.move_trail(opponent_move[:2], opponent_move[2:4])
         self.display.light_up_move(opponent_move, mode="N")
         self.board.apply_move(opponent_move)
-        self._push_move_to_ui(opponent_move, "Opponent")
         if self._voice_enabled:
             voice.announce_move(opponent_move, captured=captured)
 
-        # ── FIX: BYPASS CONFIRMATION IF THE MOVE ORIGINATED FROM THE WEB ──
-        if self._last_move_was_web:
-            log.info(f"[SYSTEM] Opponent moved {opponent_move.upper()}. Bypassing confirmation loop for web player.")
-        else:
-            current_human_turn = "White" if self.colour_choice == "white" else "Black"
-            self.oled.show_game(
-                current_human_turn,
-                last_move=opponent_move,
-                move_history=self.board._move_history_uci(),
-                status=f"Net: {opponent_move.upper()} - Press OK(9)"
-            )
-            
-            self.leds.control_panel_set_pixel(4, (255, 255, 255))
-            self.leds.panel_show()
+        # ── Push move data to UI then immediately show OK banner ──
+        ok_status = f"Opponent played {opponent_move.upper()}"
+        history    = self.board._move_history_uci()
+        whose      = self._current_turn()
+        eval_score = self.stockfish.evaluate(self.board.fen())
+        self.oled.push_move(opponent_move, whose, eval_score=eval_score)
+        web_server.update_state(
+            fen=self.board.fen(), move_history=history, whose_turn=whose,
+            last_move=opponent_move, status=ok_status, eval_score=eval_score,
+        )
 
-            while self.buttons.detect_button_nowait() != 0:
-                pass
+        # ── CONFIRMATION: physical OK or web OK both accepted ──
+        current_human_turn = "White" if self.colour_choice == "white" else "Black"
+        self.oled.show_game(
+            current_human_turn,
+            last_move=opponent_move,
+            move_history=history,
+            status=f"Net: {opponent_move.upper()} — OK to continue"
+        )
+        self.leds.control_panel_set_pixel(4, (255, 255, 255))
+        self.leds.panel_show()
+        web_server.show_ok_banner(opponent_move.upper())
 
-            while True:
-                if self._new_game_requested.is_set():
-                    raise _NewGameException()
-                
-                btn = self.buttons.detect_button_nowait()
-                if btn == 9:
-                    break
-                time.sleep(0.002)
+        self._web_ok_event.clear()
+        while self.buttons.detect_button_nowait() != 0:
+            pass
 
-            self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
-            self.leds.panel_show()
+        while True:
+            if self._new_game_requested.is_set():
+                web_server.hide_ok_banner()
+                raise _NewGameException()
+            if self._web_ok_event.is_set():
+                self._web_ok_event.clear()
+                break
+            if self._web_move_event.is_set():
+                break
+            btn = self.buttons.detect_button_nowait()
+            if btn == 9:
+                break
+            time.sleep(0.002)
+
+        web_server.hide_ok_banner()
+        self.leds.control_panel_fill((0, 0, 0), start=0, count=6)
+        self.leds.panel_show()
+        self._last_move_was_web = False  # Reset for next human turn
 
     def _choose_game_mode(self):
         log.info("Waiting for game mode selection...")
@@ -537,7 +609,45 @@ class ChessGame:
                 web_server.update_state(setup_phase="idle", web_player=self._web_player)
 
         elif self.game_mode == "OnlineHuman":
-            # ── ONLINE COLOUR SELECTION ──
+            # ── WIFI CHECK ──────────────────────────────────────────────────
+            if not self._has_network():
+                log.warning("No network — cannot start Lichess game")
+                self.oled.show_status("No WiFi — returning to menu")
+                web_server.update_state(
+                    status="No network connection — Lichess unavailable",
+                    setup_phase="idle",
+                )
+                self.leds.chess_fill((0, 0, 0))
+                for i in range(8):
+                    self.leds.chess_set_pixel(i, i,   (180, 0, 0))
+                    self.leds.chess_set_pixel(7-i, i, (180, 0, 0))
+                self.leds.chess_show()
+                time.sleep(5.0)
+                self.leds.all_off()
+                self._choose_game_mode()
+                self._setup_game()
+                return
+
+            # ── OPPONENT TYPE SELECTION ──────────────────────────────────────
+            def refresh_opponent_type():
+                self.leds.control_panel_fill((255, 255, 255), start=0, count=4)
+                self.leds.panel_show()
+                self.oled.show_status("1=Human 2=AI(easy) 3=AI(hard)")
+
+            web_server.update_state(setup_phase="online_opponent")
+            self.oled.show_status("1=Human 2=AI(easy) 3=AI(hard)")
+            ans = self._wait_for_hardware_or_web_with_sleep(
+                phase="online_opponent", refresh_callback=refresh_opponent_type
+            )
+            # ans: "human" / "ai_easy" / "ai_hard" from web, or 1/2/3 from buttons
+            if ans in (1, "human"):
+                self.lichess_opponent = "human"
+            elif ans in (3, "ai_hard"):
+                self.lichess_opponent = "ai_hard"
+            else:
+                self.lichess_opponent = "ai_easy"
+
+            # ── COLOUR SELECTION ─────────────────────────────────────────────
             def refresh_online_colour():
                 self.leds.control_panel_fill((255, 255, 255), start=0, count=4)
                 self.leds.panel_show()
@@ -547,10 +657,24 @@ class ChessGame:
             self.oled.show_setup_colour()
             self.display.show_colour_choice_icon()
             web_server.update_state(setup_phase="colour")
-            ans = self._wait_for_hardware_or_web_with_sleep(phase="colour", refresh_callback=refresh_online_colour)
+            ans = self._wait_for_hardware_or_web_with_sleep(
+                phase="colour", refresh_callback=refresh_online_colour
+            )
             self.colour_choice = ans if ans in ("white", "black") else "white"
             web_server.update_state(setup_phase="idle")
-            self.lichess.start_game(self.colour_choice)
+            try:
+                self.lichess.start_game(
+                    self.colour_choice,
+                    opponent=getattr(self, "lichess_opponent", "human"),
+                )
+            except Exception as e:
+                log.error(f"Lichess start_game failed: {e}")
+                self.oled.show_status("Lichess error — returning to menu")
+                web_server.update_state(status="Lichess connection failed")
+                time.sleep(4.0)
+                self._choose_game_mode()
+                self._setup_game()
+                return
 
         elif self.game_mode == "LocalHuman":
             self.oled.show_local_game_start()
@@ -1105,8 +1229,10 @@ class ChessGame:
         web_server.update_state(
             fen=self.board.fen(), move_history=[], whose_turn="White",
             status="New game — select mode", last_move=None, hint_move="",
-            game_active=False, usb_available=usb.is_available()
+            game_active=False, usb_available=usb.is_available(),
+            needs_ok=False, eval_score=0, last_move_uci="",
         )
+        web_server.hide_ok_banner()
         self._choose_game_mode()
         self._setup_game()
         self.anim.show_board_themed()
@@ -1140,17 +1266,77 @@ class ChessGame:
         log.info("Confirmation 'OK' received from web dashboard")
         self._web_ok_event.set()
 
+    def _set_brightness_live(self, brightness: int):
+        """Apply LED brightness change immediately to hardware."""
+        log.info(f"[DEV] Brightness set live to {brightness}")
+        self.leds.set_chess_brightness(brightness)
+        self.anim.show_board_themed()
+
+    def _viewer_board_reset(self, moves: list):
+        """
+        Prepare board for step-controlled replay from the web viewer.
+        Stores the move list and resets to start position.
+        """
+        self._viewer_moves = moves
+        self._viewer_pos   = 0
+        self.board.reset()
+        self.anim.show_board_themed()
+        log.info(f"[VIEWER] Board reset, {len(moves)} moves loaded")
+
+    def _viewer_board_goto(self, target_pos: int):
+        """
+        Jump the physical board to any position in the viewer replay.
+        Rebuilds from scratch each time to ensure correctness.
+        """
+        moves = getattr(self, "_viewer_moves", [])
+        target_pos = max(0, min(len(moves), target_pos))
+
+        self.board.reset()
+        self.anim.board_wipe((0, 0, 0), direction="left")
+
+        for i, uci in enumerate(moves[:target_pos]):
+            if self._check_move_legal(uci):
+                self.board.apply_move(uci)
+            else:
+                log.error(f"[VIEWER] Illegal move at index {i}: {uci}")
+                break
+
+        self._viewer_pos = target_pos
+        self.anim.show_board_themed()
+
+        # Light up the last move if any
+        if target_pos > 0:
+            last = moves[target_pos - 1]
+            self.anim.move_trail(last[:2], last[2:4])
+            self.display.light_up_move(last, mode="N")
+
+        log.info(f"[VIEWER] Board at position {target_pos}/{len(moves)}")
+
     @staticmethod
     def _get_local_ip() -> str:
         import socket
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1.0)
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
             s.close()
             return ip
         except Exception:
-            return "localhost"
+            return ""
+
+    @staticmethod
+    def _has_network() -> bool:
+        """Return True if the device has a routable IP (i.e. is on a network)."""
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1.0)
+            s.connect(("8.8.8.8", 80))
+            s.close()
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _map_range(value, in_min, in_max, out_min, out_max):
