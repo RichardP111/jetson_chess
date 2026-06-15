@@ -88,6 +88,7 @@ _callbacks = {
     "toggle_voice":       None,
     "web_mode_select":    None,   # called with (mode_str)
     "web_setup_answer":   None,   # called with (value) during setup
+    "slider_preview":      None,   # called with (phase, value) on drag
     "disco":              None,   # easter egg
 }
 
@@ -159,7 +160,8 @@ def _push_state():
 
 @app.route("/")
 def index():
-    return render_template_string(DASHBOARD_HTML)
+    html = DASHBOARD_HTML.replace("__SPLASH_MS__", str(int(CFG.web_splash_hold_s * 1000)))
+    return render_template_string(html)
 
 
 @app.route("/api/state")
@@ -336,6 +338,16 @@ def on_web_mode_select(data):
     if _callbacks["web_mode_select"]:
         threading.Thread(target=_callbacks["web_mode_select"],
                          args=(mode,), daemon=True).start()
+
+@socketio.on("slider_preview")
+def on_slider_preview(data):
+    """Live slider drag — update OLED without confirming."""
+    phase = data.get("phase", "difficulty")
+    value = int(data.get("value", 0))
+    cb = _callbacks.get("slider_preview")
+    if cb:
+        threading.Thread(target=cb, args=(phase, value), daemon=True).start()
+
 
 @socketio.on("web_setup_answer")
 def on_web_setup_answer(data):
@@ -603,7 +615,7 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
   <div class="topbar-right">
     <button class="icon-btn" onclick="toggleTheme()">🌓</button>
     <button class="icon-btn" id="dev-btn" onclick="openDev()">🔒 Dev</button>
-    <button class="icon-btn" onclick="document.getElementById('ov-about').classList.add('show')">v4.0</button>
+    <button class="icon-btn" onclick="document.getElementById('ov-about').classList.add('show')">v3.0</button>
   </div>
 </div>
 
@@ -626,7 +638,7 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
           <div class="setup-btns" id="setup-btns"></div>
           <div id="setup-slider-wrap" style="display:none;width:100%;align-items:center;flex-direction:column;gap:8px">
             <div class="setup-slider-val" id="setup-slider-val">—</div>
-            <input type="range" class="setup-slider" id="setup-slider" min="1" max="20" value="10">
+            <input type="range" class="setup-slider" id="setup-slider" min="1" max="8" value="4">
             <button class="setup-btn" onclick="confirmSlider()">Confirm</button>
           </div>
         </div>
@@ -745,7 +757,7 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
 
     <div class="dev-section">
       <div class="dev-section-title">Hardware</div>
-      <div class="dev-row"><label>LED brightness (0-255)</label><input type="number" id="d-chess_led_brightness" min="0" max="255"></div>
+      <div class="dev-row"><label>LED brightness (0-255) <span style="color:var(--red);font-size:10px">⚠ power limit!</span></label><input type="number" id="d-chess_led_brightness" min="0" max="255" data-caution="true"></div>
       <div class="dev-row"><label>Startup LED delay (s)</label><input type="number" id="d-startup_led_delay_s" step="0.001"></div>
       <div class="dev-row"><label>Button debounce (s)</label><input type="number" id="d-button_debounce_s" step="0.01"></div>
     </div>
@@ -770,6 +782,7 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
     </div>
 
     <button class="ctrl-btn primary full" style="margin-top:4px" onclick="saveDevSettings()">Save Settings</button>
+    <button class="ctrl-btn full" style="margin-top:6px" onclick="closeOv('ov-dev')">Close</button>
     <div id="dev-save-msg" style="font-size:12px;color:var(--green);margin-top:8px;min-height:16px"></div>
   </div>
 </div>
@@ -797,7 +810,7 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
     <button class="modal-close" onclick="closeOv('ov-about')">✕</button>
     <div class="about-logo">♟</div>
     <div style="font-size:20px;font-weight:700;color:var(--gold);margin-bottom:4px">Smart Chess Board</div>
-    <div class="about-ver">v4.0 · Jetson Orin Nano</div>
+    <div class="about-ver">v3.0 · Jetson Orin Nano</div>
     <div class="about-chips">
       <span class="chip">Python 3</span>
       <span class="chip">Flask + SocketIO</span>
@@ -808,7 +821,8 @@ input:checked+.slider-sw:before{transform:translateX(18px)}
       <span class="chip">SSD1306 OLED</span>
     </div>
     <div style="font-size:14px;color:var(--text-dim)">Made with <span class="heart">❤️</span> by Richard P</div>
-    <div style="font-size:12px;color:var(--text-dim);margin-top:12px;opacity:.5;cursor:pointer" onclick="triggerDisco()">🕺 psst...</div>
+    <div style="font-size:12px;color:var(--text-dim);margin-top:12px;opacity:.5;cursor:pointer" onclick="triggerDisco()">psst...</div>
+    <div style="margin-top:16px"><a href="https://github.com/RichardP111/jetson_chess" target="_blank" style="font-size:12px;color:var(--gold);opacity:.8">&#128279; github.com/RichardP111/jetson_chess</a></div>
   </div>
 </div>
 
@@ -825,6 +839,7 @@ let setupPhase  = 'idle';
 let webPlayer   = null;
 let hintCount   = 0;
 let discoActive = false;
+let currentSliderPhase = 'difficulty';
 
 // ═══ THEMES ═══
 const THEMES = {
@@ -837,7 +852,9 @@ let customTheme = null;
 let activeTheme = THEMES.classic;
 
 // ═══ SOCKET ═══
-socket.on('connect',    ()=>{ document.getElementById('conn-dot').classList.add('on'); });
+socket.on('connect', () => {
+  document.getElementById('conn-dot').classList.add('on');
+});
 socket.on('disconnect', ()=>{ document.getElementById('conn-dot').classList.remove('on'); });
 
 socket.on('state_update', d => {
@@ -849,8 +866,17 @@ socket.on('state_update', d => {
   webPlayer   = d.web_player || null;
   discoActive = d.disco_active || false;
 
-  document.getElementById('turn-badge').textContent =
-    d.thinking ? '🤔 Thinking...' : `${d.whose_turn}'s turn`;
+  // Don't show turn during setup
+  const tbPhase = d.setup_phase || 'idle';
+  if (tbPhase !== 'idle' && tbPhase !== 'ready') {
+    document.getElementById('turn-badge').textContent = 'Setting up...';
+  } else if (d.thinking) {
+    document.getElementById('turn-badge').textContent = 'Thinking...';
+  } else if (!d.game_active) {
+    document.getElementById('turn-badge').textContent = 'Waiting...';
+  } else {
+    document.getElementById('turn-badge').textContent = d.whose_turn + "'s turn";
+  }
   document.getElementById('mode-label').textContent = d.game_mode || '—';
   document.getElementById('status-text').textContent = d.status || '';
 
@@ -891,9 +917,22 @@ socket.on('dev_settings', d => {
 });
 
 socket.on('dev_settings_saved', d => {
-  document.getElementById('dev-save-msg').textContent =
-    d.ok ? '✓ Saved (' + d.changed.length + ' changes)' : '✗ Error';
-  setTimeout(()=>document.getElementById('dev-save-msg').textContent='', 3000);
+  const msg = document.getElementById('dev-save-msg');
+  if (d.ok) {
+    msg.style.color = 'var(--green)';
+    msg.textContent = 'Saved (' + d.changed.length + ' changes)';
+    setTimeout(() => { closeOv('ov-dev'); msg.textContent = ''; }, 1500);
+  } else {
+    msg.style.color = 'var(--red)';
+    msg.textContent = 'Save error';
+    setTimeout(() => msg.textContent = '', 3000);
+  }
+});
+// Store original brightness when dev settings load
+socket.on('dev_settings', d => {
+  const el = document.getElementById('d-chess_led_brightness');
+  if (el && d.chess_led_brightness !== undefined)
+    el.dataset.origVal = String(d.chess_led_brightness);
 });
 
 // ═══ SETUP PHASE HANDLER ═══
@@ -934,19 +973,23 @@ function handleSetupPhase(d) {
     });
   } else if (phase === 'difficulty') {
     title.textContent = 'Set AI Difficulty';
-    sub.textContent = 'Drag the slider (1 = easy, 20 = grandmaster)';
+    sub.textContent = 'Drag the slider (1 = easiest, 8 = hardest)';
+    currentSliderPhase = 'difficulty';
+    currentSliderPhase = 'difficulty';
     slWrap.style.display = 'flex';
-    slider.min = 1; slider.max = 20; slider.value = d.difficulty || 10;
-    slVal.textContent = slider.value;
-    slider.oninput = () => slVal.textContent = slider.value;
+    slider.min = 1; slider.max = 8; slider.value = 1;
+    slVal.textContent = '1';
+    // Send initial value so OLED shows 1 immediately
+    socket.emit('slider_preview', {phase: 'difficulty', value: 1});
+    slider.oninput = () => { slVal.textContent = slider.value; socket.emit('slider_preview', {phase: currentSliderPhase, value: parseInt(slider.value)}); };
   } else if (phase === 'time') {
     title.textContent = 'Set Move Time';
-    sub.textContent = 'How long should the AI think?';
-    [[3000,'3s'],[5000,'5s'],[8000,'8s'],[12000,'12s'],[20000,'20s']].forEach(([ms, label]) => {
+    sub.textContent = 'How long should the engine think per move?';
+    [[1,'1s'],[2,'2s'],[3,'3s'],[4,'5s'],[5,'8s'],[6,'12s'],[7,'20s'],[8,'30s']].forEach(([idx, label]) => {
       const b = document.createElement('button');
       b.className = 'setup-btn';
       b.textContent = label;
-      b.onclick = () => socket.emit('web_setup_answer', {value: ms});
+      b.onclick = () => { socket.emit('slider_preview', {phase:'time', value:idx}); setTimeout(()=>socket.emit('web_setup_answer', {value: idx}), 50); };
       btns.appendChild(b);
     });
   } else if (phase === 'colour') {
@@ -1189,6 +1232,20 @@ function saveDevSettings() {
     'chess_led_brightness','startup_led_delay_s','button_debounce_s',
     'hint_dismiss_s','undo_max_half_moves','stockfish_path',
     'tts_rate','tts_volume','web_port','pgn_subdir','dev_pin'];
+  // Brightness caution popup
+  const brightnessEl = document.getElementById('d-chess_led_brightness');
+  if (brightnessEl && brightnessEl.dataset.origVal !== undefined &&
+      brightnessEl.value !== brightnessEl.dataset.origVal) {
+    const newVal = parseInt(brightnessEl.value);
+    if (!confirm(
+      'WARNING: Changing LED brightness affects power draw.\n\n' +
+      'Values above 100 may draw excessive current and damage hardware.\n' +
+      'Recommended max: 76 (approx 30%).\n\nSet brightness to ' + newVal + '?'
+    )) {
+      brightnessEl.value = brightnessEl.dataset.origVal;
+      return;
+    }
+  }
   const payload = {};
   fields.forEach(f => {
     const el = document.getElementById('d-'+f);
@@ -1231,6 +1288,53 @@ document.addEventListener('keydown', e => {
 
 drawBoard();
 
+// ═══ STARTUP SPLASH ═══
+(function() {
+  // Inject splash overlay
+  const splash = document.createElement('div');
+  splash.id = 'splash';
+  splash.innerHTML = `
+    <div style="font-size:52px;margin-bottom:20px">&#9823;</div>
+    <div style="font-size:22px;font-weight:700;color:var(--gold);letter-spacing:.5px;margin-bottom:6px">Smart Chess Board</div>
+    <div style="font-size:13px;color:var(--text-dim);margin-bottom:28px">Connecting to board...</div>
+    <div style="width:180px;height:3px;background:var(--border);border-radius:2px;overflow:hidden">
+      <div id="splash-bar" style="height:100%;width:0;background:var(--gold);border-radius:2px;transition:width .3s ease"></div>
+    </div>
+    <div style="position:absolute;bottom:22px;font-size:11px;color:var(--text-dim);opacity:.45;text-align:center">
+      Made with &#10084; by Richard P
+    </div>`;
+  Object.assign(splash.style, {
+    position:'fixed', inset:'0', background:'var(--bg)',
+    display:'flex', flexDirection:'column', alignItems:'center',
+    justifyContent:'center', zIndex:'9999', transition:'opacity .5s ease'
+  });
+  document.body.appendChild(splash);
+
+  const bar = () => document.getElementById('splash-bar');
+  const HOLD = __SPLASH_MS__;   // total hold time in ms
+  const START = Date.now();
+
+  // Smooth linear progress over the full hold period
+  const iv = setInterval(() => {
+    const elapsed = Date.now() - START;
+    const pct = Math.min(100, (elapsed / HOLD) * 100);
+    const b = bar(); if (b) b.style.width = pct + '%';
+    if (pct >= 100) clearInterval(iv);
+  }, 30);  // update every 30ms for smooth animation
+
+  function hideSplash() {
+    clearInterval(iv);
+    const b = bar(); if (b) b.style.width = '100%';
+    setTimeout(() => {
+      splash.style.opacity = '0';
+      setTimeout(() => splash.remove(), 500);
+    }, 100);
+  }
+
+  // Hide after the full hold duration
+  setTimeout(hideSplash, HOLD);
+})();
+
 // ═══ LED GRID ═══
 (function(){
   const grid = document.getElementById('led-grid');
@@ -1263,6 +1367,11 @@ drawBoard();
   socket.on('state_update', d => { if(d.led_grid) updateGrid(d.led_grid); });
 })();
 </script>
+<div style="text-align:center;padding:20px 0 28px;font-size:11px;color:var(--text-dim);opacity:.4">
+  Made with <span style="color:#e05050;animation:hb .8s infinite;display:inline-block">&#10084;</span> by Richard P &nbsp;&middot;&nbsp;
+  <a href="https://github.com/RichardP111/jetson_chess" target="_blank" style="color:var(--text-dim)">GitHub</a>
+  &nbsp;&middot;&nbsp; v3.0
+</div>
 </body>
 </html>
 """

@@ -19,36 +19,47 @@ log = logging.getLogger(__name__)
 Color = Tuple[int, int, int]
 
 # ── Built-in theme definitions ────────────────────────────────────────────────
+# Themes must match web dashboard theme names exactly so the board
+# reflects whatever the user picks on the dashboard.
+# Theme colours are sent to WS2812b at ~30% brightness (76/255).
+# Dark squares need to be bright enough to be visually distinct from light
+# squares even at reduced brightness — aim for ~3:1 ratio minimum.
 THEMES = {
     "classic": {
-        "light": (255, 255, 255),
-        "dark":  (0,   0,   0),
-        "move":  (0,   255, 0),
-        "hint":  (0,   255, 255),
-    },
-    "fire": {
-        "light": (255, 140, 0),
-        "dark":  (80,  10,  0),
-        "move":  (255, 255, 0),
-        "hint":  (255, 80,  0),
+        "light": (255, 220, 150),  # warm cream — clearly bright
+        "dark":  ( 15,   8,   2),  # near-black brown — maximum contrast
+        "move":  (  0, 255,   0),  # bright green move
+        "hint":  (  0, 150, 255),  # blue hint
     },
     "ocean": {
-        "light": (0,   80,  180),
-        "dark":  (0,   20,  60),
-        "move":  (0,   255, 200),
-        "hint":  (100, 200, 255),
+        "light": ( 30, 140, 255),  # bright blue
+        "dark":  (  0,   8,  20),  # very dark navy
+        "move":  (  0, 255, 200),
+        "hint":  (100, 220, 255),
     },
     "forest": {
-        "light": (20,  80,  20),
-        "dark":  (5,   20,  5),
-        "move":  (180, 230, 100),
-        "hint":  (100, 200, 100),
+        "light": ( 60, 180,  40),  # bright green
+        "dark":  (  2,  10,   2),  # very dark green
+        "move":  (220, 255,  80),
+        "hint":  (100, 255, 150),
+    },
+    "night": {
+        "light": (100, 110, 160),  # muted blue-grey
+        "dark":  (  5,   5,  10),  # near-black
+        "move":  (255, 200,   0),
+        "hint":  (255,  80,  80),
+    },
+    "fire": {
+        "light": (255, 120,   0),  # bright orange
+        "dark":  ( 15,   2,   0),  # very dark red
+        "move":  (255, 255,   0),
+        "hint":  (255,  60,   0),
     },
     "neon": {
-        "light": (120, 0,   200),
-        "dark":  (0,   0,   40),
-        "move":  (0,   255, 150),
-        "hint":  (255, 0,   200),
+        "light": (180,   0, 255),  # bright purple
+        "dark":  (  0,   0,  12),  # very dark blue
+        "move":  (  0, 255, 150),
+        "hint":  (255,   0, 200),
     },
 }
 
@@ -89,21 +100,25 @@ class AnimationEngine:
             self._theme_name = name_or_dict
             self._theme      = dict(THEMES[name_or_dict])
             log.info(f"LED theme: {name_or_dict}")
+        # Immediately refresh board LEDs with new theme
+        self.show_board_themed()
 
     def get_theme_names(self) -> list:
         return list(THEMES.keys())
 
     def show_board_themed(self):
+        """Draw the standard chess chessboard pattern on the LEDs.
+        Light squares: (col + row) % 2 == 0
+        Dark squares:  (col + row) % 2 == 1
+        Rows run bottom-to-top: row 0 = rank 1, row 7 = rank 8.
+        """
         light = self._theme["light"]
         dark  = self._theme["dark"]
-        for col in range(0, 8, 2):
-            for row in range(8):
-                if row % 2 == 0:
-                    self.leds.chess_set_pixel(col,     row, light)
-                    self.leds.chess_set_pixel(col + 1, row, dark)
-                else:
-                    self.leds.chess_set_pixel(col,     row, dark)
-                    self.leds.chess_set_pixel(col + 1, row, light)
+        for row in range(8):
+            for col in range(8):
+                # a1 (col=0,row=0) is dark in standard chess
+                colour = dark if (col + row) % 2 == 0 else light
+                self.leds.chess_set_pixel(col, row, colour)
         self.leds.chess_show()
 
     # ── Move trail ────────────────────────────────────────────────────────────
@@ -269,7 +284,7 @@ class AnimationEngine:
             time.sleep(0.05)
 
     def _square_color(self, col: int, row: int) -> Color:
-        is_light = (col + row) % 2 == 0
+        is_light = (col + row) % 2 == 1  # a1(0,0) is dark, so odd=light
         return self._theme["light"] if is_light else self._theme["dark"]
 
     # ── Board wipe ────────────────────────────────────────────────────────────

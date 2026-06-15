@@ -36,25 +36,17 @@ class Display:
     # ── Board markings ─────────────────────────────────────────────────────
 
     def show_board_markings(self):
-        for col in range(0, 8, 2):
-            for row in range(8):
-                if row % 2 == 0:
-                    self.leds.chess_set_pixel(col,     row, WHITE)
-                    self.leds.chess_set_pixel(col + 1, row, BLACK)
-                else:
-                    self.leds.chess_set_pixel(col,     row, BLACK)
-                    self.leds.chess_set_pixel(col + 1, row, WHITE)
+        for row in range(8):
+            for col in range(8):
+                colour = BLACK if (col + row) % 2 == 0 else WHITE
+                self.leds.chess_set_pixel(col, row, colour)
         self.leds.chess_show()
 
     def show_opening_markings(self):
-        for col in range(0, 8, 2):
-            for row in list(range(2)) + list(range(6, 8)):
-                if row % 2 == 0:
-                    self.leds.chess_set_pixel(col,     row, WHITE)
-                    self.leds.chess_set_pixel(col + 1, row, BLACK)
-                else:
-                    self.leds.chess_set_pixel(col,     row, BLACK)
-                    self.leds.chess_set_pixel(col + 1, row, WHITE)
+        for row in list(range(2)) + list(range(6, 8)):
+            for col in range(8):
+                colour = BLACK if (col + row) % 2 == 0 else WHITE
+                self.leds.chess_set_pixel(col, row, colour)
         self.leds.chess_show()
 
     # ── Loading animations ─────────────────────────────────────────────────

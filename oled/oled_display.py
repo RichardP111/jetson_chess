@@ -153,12 +153,12 @@ class OLEDDisplay:
     def show_setup_difficulty(self, current: int = 0):
         self._current_screen = "setup"
         self._stop_clock()
-        self._draw_setup("Difficulty", "1-8 or slider on web", current, 20)
+        self._draw_setup("Difficulty", "1-8 or web slider", current, 8)
 
     def show_setup_timeout(self, current_ms: int = 0):
         self._current_screen = "setup"
-        secs = current_ms // 1000
-        self._draw_setup("Move Time", "1-8 or pick on web", secs, 20)
+        self._stop_clock()
+        self._draw_time_select(current_ms)
 
     def show_setup_colour(self):
         self._current_screen = "setup"
@@ -315,6 +315,40 @@ class OLEDDisplay:
                     draw.text((4, 48), f"Current: {current}", font=fs, fill="white")
                 else:
                     draw.text((4, 48), "Waiting for input...", font=ft, fill="white")
+
+    def _draw_time_select(self, current_ms: int = 0):
+        """Show 8 time options in a clean 4×2 grid. No status bar clutter."""
+        fs, fm, fl, ft = _fonts()
+        TIME_OPTIONS = [1, 2, 3, 5, 8, 12, 20, 30]
+        current_s = current_ms // 1000
+        # Layout: 12px header, 2px gap, two rows of cells filling remaining space
+        HDR  = 13           # header bar height
+        GAP  = 2            # gap after header
+        ROWS = 2
+        COLS = 4
+        cell_w = W // COLS                       # 32px each
+        cell_h = (H - HDR - GAP) // ROWS        # ~24px each
+        with self._lock:
+            with canvas(self._device) as draw:
+                draw.rectangle((0, 0, W - 1, H - 1), fill="black")
+                draw.rectangle((0, 0, W - 1, HDR - 1), fill="white")
+                draw.text((4, 2), "Move Time", font=fs, fill="black")
+                for i, secs in enumerate(TIME_OPTIONS):
+                    c = i % COLS
+                    r = i // COLS
+                    x1 = c * cell_w + 1
+                    y1 = HDR + GAP + r * cell_h + 1
+                    x2 = x1 + cell_w - 3
+                    y2 = y1 + cell_h - 3
+                    selected = (secs == current_s)
+                    if selected:
+                        draw.rectangle((x1, y1, x2, y2), fill="white")
+                        tc = "black"
+                    else:
+                        draw.rectangle((x1, y1, x2, y2), outline="white")
+                        tc = "white"
+                    label = f"{secs}s"
+                    draw.text((x1 + 3, y1 + 4), label, font=ft, fill=tc)
 
     def _draw_colour_select(self):
         fs, fm, fl, ft = _fonts()

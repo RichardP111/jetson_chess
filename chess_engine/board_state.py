@@ -121,8 +121,8 @@ class BoardState:
         return COL_MAP.get(c, 0)
 
     def row_from_char(self, c: str) -> int:
-        """Convert rank char '1'-'8' to internal row index (0=rank8, 7=rank1)."""
-        return 7 - (int(c) - 1)
+        """Convert rank char '1'-'8' to row index. rank 1 = 0 (bottom), rank 8 = 7 (top)."""
+        return int(c) - 1
 
     def parse_uci(self, uci: str):
         """Return (from_col, from_row, to_col, to_row) for a UCI string."""

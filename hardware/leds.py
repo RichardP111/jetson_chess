@@ -173,10 +173,12 @@ class LEDController:
     # ── Chessboard helpers ─────────────────────────────────────────────────
 
     def _square_to_index(self, col: int, row: int) -> int:
-        if row % 2 == 0:
-            return row * 8 + col
-        else:
-            return row * 8 + (7 - col)
+        # Strip enters at H1 (bottom-right corner), pixel 0.
+        # row 0 = rank 1 = strip row 0 (no flip needed).
+        # Even rows (rank 1,3,5,7): strip runs H→A so col 7 (H) = pixel 0 of row
+        # Odd rows  (rank 2,4,6,8): strip runs A→H so col 0 (A) = pixel 0 of row
+        phys_col = (7 - col) if row % 2 == 0 else col
+        return row * 8 + phys_col
 
     def chess_set_pixel(self, col: int, row: int, color: Tuple[int, int, int]):
         idx = self._square_to_index(col, row)

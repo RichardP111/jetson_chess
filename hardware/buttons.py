@@ -165,9 +165,9 @@ class ButtonController:
               RELEASE_SAMPLES consecutive HIGH reads to re-arm.
     """
 
-    CONFIRM_SAMPLES   = 2        # 2 consecutive LOW reads to confirm
-    RELEASE_SAMPLES   = 3        # 3 consecutive HIGH reads to re-arm
-    SAMPLE_INTERVAL_S = 0.003   # 3 ms per scan cycle
+    CONFIRM_SAMPLES   = 1        # 1 LOW read to confirm — fastest response
+    RELEASE_SAMPLES   = 2        # 2 HIGH reads to re-arm
+    SAMPLE_INTERVAL_S = 0.001   # 1 ms between scans
 
     def __init__(self):
         GPIO.setwarnings(False)
@@ -274,7 +274,7 @@ class ButtonController:
         """
         for row_idx, row_pin in enumerate(ROW_PINS):
             GPIO.output(row_pin, GPIO.LOW)
-            time.sleep(0.001)    # 1ms settle time
+            time.sleep(0.0005)   # 0.5ms settle time
             for col_idx, col_pin in enumerate(COL_PINS):
                 if GPIO.input(col_pin) == GPIO.LOW:
                     GPIO.output(row_pin, GPIO.HIGH)
@@ -311,7 +311,7 @@ class ButtonController:
         row_pin = ROW_PINS[row_idx]
         col_pin = COL_PINS[col_idx]
         GPIO.output(row_pin, GPIO.LOW)
-        time.sleep(0.001)
+        time.sleep(0.0005)
         count = sum(1 for _ in range(samples) if GPIO.input(col_pin) == GPIO.LOW)
         GPIO.output(row_pin, GPIO.HIGH)
         return count >= samples

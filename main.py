@@ -70,7 +70,7 @@ PROMOTION_NAME = {"q": "queen", "r": "rook", "b": "bishop", "n": "knight"}
 
 class ChessGame:
     def __init__(self):
-        log.info("Initialising Jetson Smart Chess Board v4...")
+        log.info("Initialising Jetson Smart Chess Board v3...")
 
         load_dotenv()
 
@@ -105,6 +105,7 @@ class ChessGame:
         # Web setup — used during mode/difficulty/time selection from browser
         self._web_setup_answer = None
         self._web_setup_event  = threading.Event()
+        self._setup_preview_val: int = 0   # live value from slider drag
 
         # Web mode select
         self._web_mode_queue: list = []
@@ -127,6 +128,7 @@ class ChessGame:
             toggle_voice     = self._toggle_voice,
             web_mode_select  = self._web_mode_received,
             web_setup_answer = self._web_setup_received,
+            slider_preview   = self._slider_preview,
             disco            = self._disco_mode,
         )
         web_server.start_server()
@@ -352,39 +354,52 @@ class ChessGame:
                 "Select game mode. Press 1 for AI, 2 for Lichess, 3 for local two player."
             )
 
-        while True:
+        # Run button scan in a background thread so web events aren't blocked
+        _mode_result: list = []
+        _mode_done = threading.Event()
+
+        def _btn_scan():
+            while not _mode_done.is_set():
+                btn = self.buttons.detect_button_nowait()
+                if btn in (1, 2, 3):
+                    _mode_result.append(btn)
+                    _mode_done.set()
+                    return
+                time.sleep(0.01)
+
+        _scan_thread = threading.Thread(target=_btn_scan, daemon=True)
+        _scan_thread.start()
+
+        while not _mode_done.is_set():
             # Check web mode selection
-            if self._web_mode_event.wait(timeout=0.02):
+            if self._web_mode_event.wait(timeout=0.05):
                 self._web_mode_event.clear()
                 if self._web_mode_queue:
+                    _mode_done.set()
                     self._apply_web_mode(self._web_mode_queue.pop(0))
                     break
                 continue
 
-            # Physical button fallback (1=AI, 2=Lichess, 3=Local)
-            btn = self.buttons.detect_button_nowait()
+        if _mode_result:
+            btn = _mode_result[0]
             if btn == 1:
                 self.game_mode = "Stockfish"
                 self._web_player = None
                 self.display.confirm_ai_mode()
                 if self._voice_enabled:
                     voice.announce_status("AI mode selected")
-                break
             elif btn == 2:
                 self.game_mode = "OnlineHuman"
                 self._web_player = None
                 self.display.confirm_online_mode()
                 if self._voice_enabled:
                     voice.announce_status("Online mode selected")
-                break
             elif btn == 3:
                 self.game_mode = "LocalHuman"
                 self._web_player = None
                 self.display.confirm_local_mode()
                 if self._voice_enabled:
                     voice.announce_status("Local two player mode selected")
-                break
-            time.sleep(0.03)
 
         web_server.update_state(game_mode=self.game_mode, setup_phase="idle",
                                 web_player=self._web_player)
@@ -416,12 +431,18 @@ class ChessGame:
             web_server.update_state(setup_phase="difficulty", difficulty=CFG.difficulty_default)
             if self._voice_enabled:
                 voice.announce_status("Set AI difficulty")
-            ans = self._wait_setup_answer()
-            if isinstance(ans, int):
-                self.difficulty = max(CFG.difficulty_min, min(CFG.difficulty_max, ans))
+            self._setup_preview_val = 1  # start at 1
+            self.oled.show_setup_difficulty(1)  # show bar at 1 immediately
+            ans = self._wait_setup_answer(phase="difficulty")
+            ans_int = int(ans) if ans else CFG.difficulty_default
+            if ans_int <= 8:
+                self.difficulty = self._map_range(ans_int, 1, 8,
+                                                  CFG.difficulty_min,
+                                                  CFG.difficulty_max)
             else:
-                btn = int(ans) if ans else 5
-                self.difficulty = self._map_range(btn, 1, 8, CFG.difficulty_min, CFG.difficulty_max)
+                self.difficulty = max(CFG.difficulty_min,
+                                      min(CFG.difficulty_max, ans_int))
+            self._setup_preview_val = 0
             self.oled.show_setup_difficulty(self.difficulty)
             web_server.update_state(difficulty=self.difficulty, setup_phase="time")
 
@@ -430,17 +451,12 @@ class ChessGame:
             self.display.show_timeout_icon()
             if self._voice_enabled:
                 voice.announce_status("Set move time")
-            ans = self._wait_setup_answer()
-            # Web sends ms directly (>= 1000), buttons send 1-8
-            if isinstance(ans, int) and ans >= 1000:
-                self.move_timeout_ms = max(CFG.movetime_min_ms,
-                                           min(CFG.movetime_max_ms, ans))
-            else:
-                btn = int(ans) if ans else 5
-                btn = max(1, min(8, btn))
-                self.move_timeout_ms = self._map_range(btn, 1, 8,
-                                                       CFG.movetime_min_ms,
-                                                       CFG.movetime_max_ms)
+            self._setup_preview_val = 5
+            ans = self._wait_setup_answer(phase="time")
+            # Both web and buttons send 1-8 index
+            TIME_MS = [1000, 2000, 3000, 5000, 8000, 12000, 20000, 30000]
+            idx = max(1, min(8, int(ans) if ans else 5))
+            self.move_timeout_ms = TIME_MS[idx - 1]
             self.oled.show_setup_timeout(self.move_timeout_ms)
             web_server.update_state(setup_phase="idle")
 
@@ -725,32 +741,58 @@ class ChessGame:
         self._web_mode_event.set()
         log.info(f"Web mode queued: {mode}")
 
+    def _slider_preview(self, phase: str, value: int):
+        """Called live on every slider drag — updates OLED and stores preview value."""
+        self._setup_preview_val = value
+        if phase == "difficulty":
+            self.oled.show_setup_difficulty(value)
+        elif phase == "time":
+            # value is 1-8 index; map to seconds for OLED display
+            TIME_OPTIONS = [1, 2, 3, 5, 8, 12, 20, 30]
+            secs = TIME_OPTIONS[min(value - 1, 7)]
+            self.oled.show_setup_timeout(secs * 1000)
+
     def _web_setup_received(self, value):
-        """Called from web server when browser answers a setup prompt."""
+        """Called from web server when browser answers a setup prompt.
+        value can be:
+          - a plain int/str → final answer (confirm button pressed)
+          - a dict {preview: True, value: N} → live slider drag
+        """
         self._web_setup_answer = value
         self._web_setup_event.set()
         log.info(f"Web setup answer: {value}")
 
-    def _wait_setup_answer(self):
-        """Block until setup answer arrives from web or physical buttons."""
+
+    def _wait_setup_answer(self, phase: str = ""):
+        """Block until setup answer arrives from web confirm or physical buttons.
+        Live slider preview is handled separately via _slider_preview callback.
+        OK button (btn 9) confirms whatever _setup_preview_val is currently set to.
+        Any other button 1-8 confirms immediately with that button number.
+        """
         self._web_setup_event.clear()
         self._web_setup_answer = None
+
         while True:
-            if self._web_setup_event.wait(timeout=0.05):
+            if self._web_setup_event.wait(timeout=0.03):
                 self._web_setup_event.clear()
                 return self._web_setup_answer
+
             btn = self.buttons.detect_button_nowait()
-            if btn:
+            if btn == 9:
+                # OK confirms current preview value, or falls back to default
+                return self._setup_preview_val or 4
+            elif btn and btn != 0:
                 return btn
             time.sleep(0.02)
 
     def _disco_mode(self):
         """Easter egg: disco light show on the chess board LEDs."""
         import random
-        log.info("🕺 DISCO MODE ACTIVATED")
+        log.info("DISCO MODE ACTIVATED")
         self.anim.stop_thinking_animation()
-        web_server.update_state(disco_active=True, status="🕺 DISCO MODE!")
-        self.oled.show_status("🕺 DISCO!")
+        web_server.update_state(disco_active=True, status="DISCO MODE!")
+        # OLED: show text without emoji (OLED font can't render them)
+        self.oled.show_status("DISCO MODE!")
         end = time.time() + 15.0
         while time.time() < end:
             for i in range(64):
@@ -762,8 +804,15 @@ class ChessGame:
                 self.leds.chess_set_pixel(col, row, (r, g, b))
             self.leds.chess_show()
             time.sleep(0.05)
+        # Restore board state after disco ends
         web_server.update_state(disco_active=False, status="Your move")
         self.anim.show_board_themed()
+        # Restore OLED to current game screen
+        self.oled.show_game(
+            self._current_turn(),
+            status="Your move...",
+            move_history=self.board._move_history_uci(),
+        )
 
     # ── Validation ─────────────────────────────────────────────────────────
 
@@ -846,18 +895,23 @@ class ChessGame:
         self.anim.board_wipe((0, 0, 0), direction="left")
         self.display.loading_animation_fast()
         time.sleep(1)
-        self.anim.show_board_themed()
-        self.oled.show_game("White", status="New game! Your move.")
         web_server.update_state(
             fen=self.board.fen(),
             move_history=[],
             whose_turn="White",
-            status="New game",
+            status="New game — select mode",
             last_move=None,
             hint_move="",
+            game_active=False,
             usb_available=usb.is_available(),
         )
+        # Always go through full mode select + setup for new game
+        self._choose_game_mode()
         self._setup_game()
+        self.anim.show_board_themed()
+        self.oled.show_game("White", status="New game! Your move.")
+        web_server.update_state(game_active=True, status="Game started",
+                                whose_turn="White")
         if self._voice_enabled:
             voice.announce_status("New game. White to move.")
 
