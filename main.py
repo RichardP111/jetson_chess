@@ -2,8 +2,8 @@
 # =============================================================================
 # main.py
 # Author : Richard Pu
+# Created: 2026-06-10  |  Revised: 2026-06-12
 # Purpose: Core orchestrator for the Jetson Orin Nano Smart Chess Board.
-#          Cleaned and insulated against syntax, type, and logic errors.
 # =============================================================================
 
 from __future__ import annotations

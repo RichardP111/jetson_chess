@@ -8,10 +8,6 @@
 #          Tries espeak-ng (fastest, offline, apt-installable) first, then
 #          pyttsx3 as a fallback.  Set MOCK_VOICE=1 or DISABLE_VOICE=1 to
 #          suppress all speech.
-#
-# Install (optional):
-#   sudo apt install espeak-ng -y
-#   # OR: pip install pyttsx3 --break-system-packages
 # =============================================================================
 
 import os

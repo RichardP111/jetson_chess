@@ -3,24 +3,6 @@
 # Author : Richard Pu
 # Created: 2026-06-10  |  Revised: 2026-06-14
 # Purpose: Real-time web dashboard for the Jetson smart chessboard.
-#
-# Features
-# ────────
-#  • Interactive canvas chess board — click to move pieces
-#  • Legal move highlighting
-#  • Light / dark mode
-#  • Google Sans typography
-#  • Custom LED theme builder
-#  • USB game save + PGN download
-#  • OTA git-pull + restart (token-protected)
-#  • Undo, hint, new game controls
-#  • Voice toggle
-#  • Dev menu (PIN-protected, default PIN in CFG)
-#  • About modal
-#  • Game mode selection from web (vs AI / local 2P / web 2P)
-#  • Difficulty + time control from web
-#  • Web player 2 input for LocalHuman mode
-#  • Disco easter egg (hint button ×10 or secret web button)
 # =============================================================================
 
 import os

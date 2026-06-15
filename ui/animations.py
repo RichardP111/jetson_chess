@@ -1,9 +1,8 @@
 # =============================================================================
 # ui/animations.py
 # Author : Richard Pu
+# Created: 2026-06-10  |  Revised: 2026-06-12
 # Purpose: LED animations and themes for the chessboard strip.
-#          Fixed: Added automated board theme restore on thinking termination
-#                 to clear stray frozen spinner frames completely.
 # =============================================================================
 
 import time

@@ -1,3 +1,10 @@
+# =============================================================================
+# ui/display.py
+# Author : Richard Pu
+# Created: 2026-06-10  |  Revised: 2026-06-12
+# Purpose: LED board display logic.
+# =============================================================================
+
 import time
 import logging
 from hardware.leds import LEDController

@@ -5,9 +5,6 @@ from __future__ import annotations
 # Created: 2026-06-10  |  Revised: 2026-06-12
 # Purpose: SSD1306 128×64 I2C OLED driver for the Grove connector on the
 #          Jetson. Renders all game screens with a clear, navigable layout.
-#          New screens: promotion select, undo confirm, local two-player,
-#          USB save confirmation, post-game analysis summary.
-#          Set MOCK_OLED=1 for headless use.
 # =============================================================================
 
 import os
@@ -15,13 +12,17 @@ import time
 import logging
 import threading
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Callable, Any
 
 from config import CFG
 
 log = logging.getLogger(__name__)
 
 MOCK = os.environ.get("MOCK_OLED", "0") == "1"
+
+# Type hints for cross-branch initialization
+_make_device_fn: Callable[[], Any]
+_load_font_fn: Callable[[int], Any]
 
 if not MOCK:
     try:
@@ -59,11 +60,11 @@ if MOCK:
         def line(self, *a, **k):      pass
         def ellipse(self, *a, **k):   pass
 
-    def _make_device_mock():
+    def _make_device_mock() -> Any:
         log.debug("[MOCK OLED] device created")
         return _FakeDevice()
 
-    def _load_font_mock(size: int = 10):
+    def _load_font_mock(size: int = 10) -> Any:
         return None
 
     canvas = _FakeCanvas  # noqa: F811
@@ -72,17 +73,20 @@ if MOCK:
     _load_font_fn   = _load_font_mock
 
 else:
-    def _make_device_fn():
+    def _make_device_real() -> Any:
         serial = i2c(port=CFG.oled_i2c_port, address=CFG.oled_i2c_addr)
         return ssd1306(serial, width=CFG.oled_width, height=CFG.oled_height)
 
-    def _load_font_fn(size: int = 10):
+    def _load_font_real(size: int = 10) -> Any:
         try:
             return ImageFont.truetype(
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size
             )
         except Exception:
             return ImageFont.load_default()
+
+    _make_device_fn = _make_device_real
+    _load_font_fn   = _load_font_real
 
 
 W, H = CFG.oled_width, CFG.oled_height
@@ -103,21 +107,6 @@ def _fonts():
 class OLEDDisplay:
     """
     Rich OLED UI.
-
-    Screens
-    -------
-    idle              : clock + branding
-    mode_select       : game-mode prompt  (1=AI  2=Online  3=Local)
-    setup             : difficulty / timeout / colour setup
-    game              : move history, whose turn, eval bar, status line
-    hint              : suggested best move
-    promotion_select  : choose promotion piece (Q R B N)
-    undo_confirm      : confirm undo with move count
-    checkmate         : winner announcement + move count
-    new_game          : splash screen
-    usb_saved         : brief USB save confirmation
-    analysis          : post-game top-3 blunders
-    loading           : startup progress bar
     """
 
     def __init__(self):
@@ -199,7 +188,6 @@ class OLEDDisplay:
         if self._current_screen == "game":
             self._draw_game()
         else:
-            # Show status on any screen via a brief overlay
             self._draw_status_overlay(msg)
 
     def show_checkmate(self, winner: str):
@@ -215,33 +203,22 @@ class OLEDDisplay:
         self._draw_loading(progress, total)
 
     def show_promotion_select(self, colour: str = "White"):
-        """
-        Prompt the player to choose a promotion piece.
-        Shows: Q  R  B  N  with their button numbers (1-4) clearly labelled.
-        """
         self._current_screen = "promotion"
         self._draw_promotion_select(colour)
 
     def show_undo_confirm(self, half_moves: int):
-        """Show a brief confirmation that N half-moves were undone."""
         self._current_screen = "undo"
         self._draw_undo_confirm(half_moves)
 
     def show_usb_saved(self, filename: str):
-        """Show a brief confirmation that the game was saved to USB."""
         self._current_screen = "usb_saved"
         self._draw_usb_saved(filename)
 
     def show_analysis(self, blunders: list):
-        """
-        Display the top blunders after the game.
-        blunders: list of dicts: [{'move': 'e4d5', 'loss': 320, 'best': 'g1f3'}, ...]
-        """
         self._current_screen = "analysis"
         self._draw_analysis(blunders)
 
     def show_local_game_start(self):
-        """Splash for local two-player mode."""
         fs, fm, fl, ft = _fonts()
         with self._lock:
             with canvas(self._device) as draw:
@@ -253,23 +230,19 @@ class OLEDDisplay:
                 draw.text((4, 43), "turn. Good luck!", font=ft, fill="white")
 
     def show_draw(self, reason: str):
-        """Show draw result screen."""
         self._current_screen = "draw"
         self._stop_clock()
         self._draw_draw(reason)
 
     def show_pass_board(self, next_turn: str, move_count: int):
-        """Show pass-the-board screen for local 2P mode."""
         self._current_screen = "pass"
         self._draw_pass_board(next_turn, move_count)
 
     def show_network_info(self, ip: str):
-        """Show IP address for web dashboard access."""
         self._current_screen = "network"
         self._draw_network_info(ip)
 
     def show_coordinate_prompt(self, step: str, partial: str = ""):
-        """Show current coordinate input state during move entry."""
         if self._current_screen == "game":
             self._draw_coordinate_prompt(step, partial)
 
@@ -307,7 +280,6 @@ class OLEDDisplay:
                 draw.rectangle((0, 0, W - 1, 14), fill="white")
                 draw.text((4, 1), label, font=fm, fill="black")
                 draw.text((4, 18), prompt, font=fs, fill="white")
-                # Progress bar
                 draw.rectangle((4, 34, W - 4, 44), outline="white")
                 if current > 0:
                     bar_w = int((current / max_val) * (W - 8))
@@ -317,17 +289,15 @@ class OLEDDisplay:
                     draw.text((4, 48), "Waiting for input...", font=ft, fill="white")
 
     def _draw_time_select(self, current_ms: int = 0):
-        """Show 8 time options in a clean 4×2 grid. No status bar clutter."""
         fs, fm, fl, ft = _fonts()
         TIME_OPTIONS = [1, 2, 3, 5, 8, 12, 20, 30]
         current_s = current_ms // 1000
-        # Layout: 12px header, 2px gap, two rows of cells filling remaining space
-        HDR  = 13           # header bar height
-        GAP  = 2            # gap after header
+        HDR  = 13           
+        GAP  = 2            
         ROWS = 2
         COLS = 4
-        cell_w = W // COLS                       # 32px each
-        cell_h = (H - HDR - GAP) // ROWS        # ~24px each
+        cell_w = W // COLS                       
+        cell_h = (H - HDR - GAP) // ROWS        
         with self._lock:
             with canvas(self._device) as draw:
                 draw.rectangle((0, 0, W - 1, H - 1), fill="black")
@@ -366,10 +336,8 @@ class OLEDDisplay:
 
     @staticmethod
     def _uci_to_san_approx(uci: str) -> str:
-        """Very lightweight UCI → readable format (e2e4 → e4, g1f3 → Nf3 approx)."""
         if len(uci) < 4:
             return uci
-        # Just show destination square for moves, which is most useful
         promo = uci[4].upper() if len(uci) >= 5 else ""
         return uci[2:4] + promo if not promo else uci[2:4] + "=" + promo
 
@@ -381,7 +349,6 @@ class OLEDDisplay:
             with canvas(self._device) as draw:
                 draw.rectangle((0, 0, W - 1, H - 1), fill="black")
 
-                # ── Top bar: whose turn ──────────────────────────────────────
                 bar_color = "white" if self._whose_turn == "White" else "gray"
                 draw.rectangle((0, 0, W - 1, 13), fill=bar_color)
                 tc = "black" if self._whose_turn == "White" else "white"
@@ -390,14 +357,12 @@ class OLEDDisplay:
                             "LocalHuman": "2P"}.get(self._game_mode, "")
                 draw.text((96, 1), mode_lbl, font=ft, fill=tc)
 
-                # ── Eval bar (small, below top bar) ─────────────────────────
                 score   = max(-500, min(500, self._eval_score))
-                pct     = (score + 500) / 1000.0  # 0.0–1.0, white advantage right
+                pct     = (score + 500) / 1000.0  
                 bar_len = int(pct * (W - 2))
                 draw.rectangle((0, 14, bar_len, 16), fill="white")
                 draw.rectangle((bar_len, 14, W - 1, 16), fill="gray")
 
-                # ── Move history (last 3 pairs) ──────────────────────────────
                 y = 19
                 draw.text((0, y), "Moves:", font=ft, fill="white")
                 y += 9
@@ -414,7 +379,6 @@ class OLEDDisplay:
                     draw.text((64, y), bm_r,        font=ft, fill="white")
                     y += 9
 
-                # ── Status bar ────────────────────────────────────────────────
                 draw.line((0, H - 12, W - 1, H - 12), fill="white")
                 status = (self._status_msg or
                           (f"Last: {self._last_move}" if self._last_move
@@ -441,7 +405,6 @@ class OLEDDisplay:
                 draw.rectangle((0, 0, W - 1, 14), fill="white")
                 draw.text((4, 1), "Promote Pawn!", font=fm, fill="black")
                 draw.text((4, 16), colour, font=ft, fill="white")
-                # Four options in a 2×2 grid
                 draw.rectangle((4,  26, 60, 42), outline="white")
                 draw.text((8,  29), "1: Queen",  font=ft, fill="white")
                 draw.rectangle((66, 26, 122, 42), outline="white")
@@ -477,7 +440,6 @@ class OLEDDisplay:
                 draw.text((4, 55), "when done.", font=ft, fill="white")
 
     def _draw_analysis(self, blunders: list):
-        """Display post-game top blunders (up to 3)."""
         fs, fm, fl, ft = _fonts()
         with self._lock:
             with canvas(self._device) as draw:
@@ -535,14 +497,12 @@ class OLEDDisplay:
                 draw.text((4, 50), f"Starting... {pct}%", font=ft, fill="white")
 
     def _draw_status_overlay(self, msg: str):
-        """Brief status message on any screen."""
         fs, fm, fl, ft = _fonts()
         with self._lock:
             with canvas(self._device) as draw:
                 draw.rectangle((0, 0, W - 1, H - 1), fill="black")
                 draw.rectangle((0, 0, W - 1, 14), fill="white")
                 draw.text((4, 1), "Status", font=fs, fill="black")
-                # Word-wrap the message
                 words = msg.split()
                 lines = []
                 line = ""
@@ -600,7 +560,6 @@ class OLEDDisplay:
                 draw.text((4, 54), "Starting game...", font=ft, fill="white")
 
     def _draw_coordinate_prompt(self, step: str, partial: str = ""):
-        """Show column/row selection state in the game screen status bar."""
         fs, fm, fl, ft = _fonts()
         with self._lock:
             with canvas(self._device) as draw:

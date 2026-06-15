@@ -6,12 +6,6 @@
 #          If a USB drive is plugged in, games are saved as PGN files.
 #          If no USB drive is present the feature is completely silent —
 #          no errors, no prompts.
-#
-# Usage:
-#   from usb_storage import usb
-#   usb.save_game(board, game_mode, difficulty)   # saves if USB present
-#   games = usb.list_games()                       # [] if no USB
-#   pgn_text = usb.load_game(filename)            # None if not found
 # =============================================================================
 
 import os

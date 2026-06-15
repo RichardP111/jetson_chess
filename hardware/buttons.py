@@ -1,8 +1,8 @@
 # =============================================================================
 # hardware/buttons.py
 # Author : Richard Pu
+# Created: 2026-06-10  |  Revised: 2026-06-12
 # Purpose: High-performance button matrix driver for Jetson Orin Nano.
-#          Fixed: Self-contained debounce sweep for instant nowait registration.
 # =============================================================================
 
 from __future__ import annotations
